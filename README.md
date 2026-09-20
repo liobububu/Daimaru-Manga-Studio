@@ -4,6 +4,15 @@
 
 **一句话：双击即用、零依赖、数据全在本机、可接任意 OpenAI 兼容 API。**
 
+## 下载
+
+不想自己构建的话，到 [Releases](https://github.com/liobububu/Daimaru-Manga-Studio/releases) 下载
+`DaimaruMangaStudio-vX.Y.Z-win-x64.zip`（当前版本 **v1.0.0**），解压后双击
+`DaimaruMangaStudio.exe` 即可 —— 不需要安装 Node 或其它运行时，FFmpeg 也已内置。
+
+> 压缩包内的文件名是 ASCII。中文文件名在 zip 里依赖系统编码，部分解压工具会解成乱码；
+> 解压后你可以自行把 exe 改成中文名，不影响运行。
+
 ---
 
 ## 与 Concat 的关系（先说清楚许可）
