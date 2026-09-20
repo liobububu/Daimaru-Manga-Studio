@@ -10,7 +10,7 @@
 - Unique Signal Color (selectable based on user requirements): Used for selected states, primary buttons, and current status indicators. → Should remain clear but not glaring in dark environments.
 
 # Font
-- Heading & Body: Montserrat (url: https://resource-static.bj.bcebos.com/fonts/Montserrat-VariableFont_wght.woff2)
+- Heading & Body: Montserrat（由 `src/index.css` 从 Google Fonts 引入）
 # Animation
 ## Elemental animation
 - The animation is minimalist and linear. Elements slide into place along the grid lines;

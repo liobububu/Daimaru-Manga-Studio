@@ -6,7 +6,7 @@
  * Usage example:
  * <Video
  *   src="" // Video resource URL, defaults to empty string
- *   poster="https://internal-amis-res.cdn.bcebos.com/images/2019-12/1577157239810/da6376bf988c.png" // Video poster image
+ *   poster="/poster.jpg" // Video poster image，可留空
  * />
  */
 
