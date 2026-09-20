@@ -543,27 +543,6 @@ function AudioPlayer({ url, small }: { url: string; small?: boolean }) {
 }
 
 // ─── 主页面 ───────────────────────────────────────────────────────────────────
-// 占位 Tab 组件（P1/P2 功能预留）
-function ComingSoonTab({ icon, title, desc, phase }: {
-  icon: React.ReactNode;
-  title: string;
-  desc: string;
-  phase: 'P1' | 'P2';
-}) {
-  return (
-    <Card className="bg-card border-border border-dashed">
-      <CardContent className="flex flex-col items-center justify-center py-16 text-center gap-3">
-        <div className="text-muted-foreground">{icon}</div>
-        <div>
-          <p className="font-semibold text-foreground">{title}</p>
-          <p className="text-sm text-muted-foreground mt-1 max-w-sm">{desc}</p>
-        </div>
-        <Badge variant="secondary" className="text-xs">{phase} · 即将推出</Badge>
-      </CardContent>
-    </Card>
-  );
-}
-
 export default function AudioProductionPage() {
   const navigate = useNavigate();
   // 数据

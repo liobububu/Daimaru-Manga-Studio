@@ -25,6 +25,12 @@ import {
 import 'video-react/dist/video-react.css';
 import './video.css';
 import { cn } from '@/lib/utils';
+import type { FC } from 'react';
+
+// @types/video-react 把 FullscreenToggle 的 actions 标成必填，但 actions / player
+// 实际由 Player 渲染子节点时注入。这里只放宽类型、不额外传 props，
+// 避免用空对象覆盖掉运行期注入的真实 actions。
+const FullscreenToggleControl = FullscreenToggle as unknown as FC<{ key?: string }>;
 
 interface VideoProps {
     /** Video resource URL */
@@ -72,7 +78,7 @@ export default function Video({
                     <TimeDivider key="time-divider" />
                     <DurationDisplay key="duration-display" />
                     <ProgressControl key="progress-control" />
-                    <FullscreenToggle key="fullscreen-toggle" />
+                    <FullscreenToggleControl key="fullscreen-toggle" />
                 </ControlBar>
                 <BigPlayButton position="center" />
             </Player>
