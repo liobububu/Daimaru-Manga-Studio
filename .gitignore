@@ -29,7 +29,6 @@ local/data/
 
 # 构建工具（postject 等）
 .build-tools/
-package-lock.json
 playwright-report
 test-results
 
