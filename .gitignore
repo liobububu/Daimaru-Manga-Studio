@@ -1,0 +1,60 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+output
+*.local
+
+# 打包产物（exe 84MB + 内嵌 FFmpeg 79MB，绝不入库）
+dist-exe/
+
+# 打包中间产物（脚本本身要保留，只排除生成物）
+build/bundled-server.cjs
+build/sea-prep.blob
+build/sea-config.json
+build/smoke-*.exe
+*.exe
+*.blob
+
+# 本地版数据目录：含加密的 API Key、素材与成片
+local/data/
+
+# 构建工具（postject 等）
+.build-tools/
+package-lock.json
+playwright-report
+test-results
+
+# Environment files (NEVER commit real credentials)
+.env
+.env.*
+!.env.example
+.env.local
+.env.*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+package.json.[0-9]*
+.sync
+history/*.json
+.vite_cache
+/.skills
+/tasks
+.native-wind-cache
+.vite

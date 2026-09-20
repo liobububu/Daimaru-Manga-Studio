@@ -1,0 +1,128 @@
+/* stylelint-disable */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 设计系统 - 动画大丸家 3.0 暗色主题 */
+@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap');
+
+@layer base {
+  :root {
+    --radius: 0.5rem;
+    /* Dark theme tokens (always dark) */
+    --background: 222 47% 7%;
+    --foreground: 216 20% 92%;
+    --card: 222 40% 10%;
+    --card-foreground: 216 20% 92%;
+    --popover: 222 40% 10%;
+    --popover-foreground: 216 20% 92%;
+    --primary: 245 80% 65%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 222 30% 16%;
+    --secondary-foreground: 216 20% 80%;
+    --muted: 222 30% 14%;
+    --muted-foreground: 216 12% 55%;
+    --accent: 267 65% 60%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 222 25% 17%;
+    --input: 222 30% 14%;
+    --ring: 245 80% 65%;
+    --success: 142 71% 45%;
+    --warning: 38 92% 50%;
+    --info: 200 90% 50%;
+    --sidebar-background: 222 47% 7%;
+    --sidebar-foreground: 216 20% 80%;
+    --sidebar-primary: 245 80% 65%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 222 30% 13%;
+    --sidebar-accent-foreground: 216 20% 92%;
+    --sidebar-border: 222 25% 14%;
+    --sidebar-ring: 245 80% 65%;
+    --chart-1: 245 80% 65%;
+    --chart-2: 267 65% 60%;
+    --chart-3: 142 71% 45%;
+    --chart-4: 38 92% 50%;
+    --chart-5: 200 90% 50%;
+    --gradient-primary: linear-gradient(135deg, hsl(245, 80%, 65%), hsl(267, 65%, 60%));
+    --gradient-card: linear-gradient(145deg, hsl(222, 40%, 11%), hsl(222, 40%, 9%));
+    --gradient-background: linear-gradient(180deg, hsl(222, 47%, 8%), hsl(222, 47%, 6%));
+    --shadow-card: 0 4px 24px rgba(0,0,0,0.4);
+    --shadow-hover: 0 8px 32px rgba(99,102,241,0.15);
+    --education-blue: 245 80% 65%;
+    --education-green: 142 71% 45%;
+  }
+
+  .dark {
+    --background: 222 47% 7%;
+    --foreground: 216 20% 92%;
+    --card: 222 40% 10%;
+    --card-foreground: 216 20% 92%;
+    --popover: 222 40% 10%;
+    --popover-foreground: 216 20% 92%;
+    --primary: 245 80% 65%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 222 30% 16%;
+    --secondary-foreground: 216 20% 80%;
+    --muted: 222 30% 14%;
+    --muted-foreground: 216 12% 55%;
+    --accent: 267 65% 60%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 222 25% 17%;
+    --input: 222 30% 14%;
+    --ring: 245 80% 65%;
+    --sidebar-background: 222 47% 7%;
+    --sidebar-foreground: 216 20% 80%;
+    --sidebar-primary: 245 80% 65%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 222 30% 13%;
+    --sidebar-accent-foreground: 216 20% 92%;
+    --sidebar-border: 222 25% 14%;
+    --sidebar-ring: 245 80% 65%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border)) transparent;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Montserrat', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    background: hsl(var(--background));
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: 'Montserrat', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    font-weight: 600;
+  }
+}
+
+@layer utilities {
+  .gradient-text {
+    background-image: var(--gradient-primary);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .glass-card {
+    background: linear-gradient(145deg, hsl(222 40% 11% / 0.9), hsl(222 40% 9% / 0.9));
+    backdrop-filter: blur(8px);
+    border: 1px solid hsl(var(--border));
+  }
+
+  .status-pending { color: hsl(var(--muted-foreground)); }
+  .status-submitted { color: hsl(var(--info)); }
+  .status-processing { color: hsl(var(--warning)); }
+  .status-completed { color: hsl(var(--success)); }
+  .status-failed { color: hsl(var(--destructive)); }
+  .status-expired { color: hsl(var(--muted-foreground)); }
+  .status-timeout { color: hsl(var(--warning)); }
+}

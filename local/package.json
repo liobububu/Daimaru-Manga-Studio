@@ -1,0 +1,6 @@
+{
+  "name": "donghua-local-server",
+  "private": true,
+  "description": "动画大丸家本地版服务端。根 package.json 是 ESM（前端构建用），这里显式声明 CommonJS。",
+  "type": "commonjs"
+}
