@@ -9,6 +9,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Search, Image, Check } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { getAssets } from '@/services/api';
+import { db } from '@/db/client';
 import type { Asset, AssetType } from '@/types/types';
 
 interface AssetPickerDialogProps {
@@ -22,6 +23,8 @@ interface AssetPickerDialogProps {
   assetType?: AssetType;
   projectId?: string;
   title?: string;
+  /** 按素材 metadata.category 筛选创作资产：character / scene / prop */
+  category?: 'character' | 'scene' | 'prop';
 }
 
 const ALL_PROJECTS = '__all__';
@@ -34,6 +37,7 @@ export default function AssetPickerDialog({
   assetType = 'image',
   projectId,
   title = '从素材库选择',
+  category,
 }: AssetPickerDialogProps) {
   const [assets, setAssets] = useState<Asset[]>([]);
   const [loading, setLoading] = useState(false);
@@ -65,7 +69,8 @@ export default function AssetPickerDialog({
   }, [open, load]);
 
   const filtered = assets.filter(a =>
-    a.name.toLowerCase().includes(search.toLowerCase()),
+    a.name.toLowerCase().includes(search.toLowerCase()) &&
+    (!category || a.metadata?.category === category),
   );
 
   function toggleSelect(id: string) {
@@ -191,7 +196,6 @@ export default function AssetPickerDialog({
 
 /** 获取当前用户所有项目的图片素材（跨项目浏览） */
 async function getAssetsAllProjects(assetType?: AssetType): Promise<Asset[]> {
-  const { db } = await import('@/db/client');
   let q = db.from('assets').select('*').order('created_at', { ascending: false }).limit(200);
   if (assetType) q = q.eq('asset_type', assetType);
   const { data } = await q;

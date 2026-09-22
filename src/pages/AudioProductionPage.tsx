@@ -1188,7 +1188,10 @@ export default function AudioProductionPage() {
       const wav  = encodeWav(outBuf);
       const blob = new Blob([wav.buffer as ArrayBuffer], { type: 'audio/wav' });
       const url  = URL.createObjectURL(blob);
-      setEnhResultUrl(url);
+      setEnhResultUrl(previous => {
+        if (previous) URL.revokeObjectURL(previous);
+        return url;
+      });
       setEnhResultName(enhFile.name.replace(/\.[^.]+$/, '') + '_enhanced.wav');
       toast.success('音频处理完成');
     } catch (e) {
@@ -1203,6 +1206,10 @@ export default function AudioProductionPage() {
     const a = document.createElement('a'); a.href = enhResultUrl;
     a.download = enhResultName; a.click();
   }
+
+  useEffect(() => () => {
+    if (enhResultUrl) URL.revokeObjectURL(enhResultUrl);
+  }, [enhResultUrl]);
 
   const ttsModels = models.filter(m =>
     m.enabled && (m.capabilities.includes('tts') || m.capabilities.includes('audio_generation'))

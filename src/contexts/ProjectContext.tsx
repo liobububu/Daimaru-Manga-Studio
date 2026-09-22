@@ -30,6 +30,11 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     try {
       const data = await getProjects();
       setProjects(data);
+      setSelectedProjectId(current => {
+        if (!current || data.some(project => project.id === current)) return current;
+        localStorage.removeItem('selectedProjectId');
+        return null;
+      });
     } catch {
       // 静默失败
     } finally {

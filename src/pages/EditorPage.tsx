@@ -10,7 +10,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Skeleton } from '@/components/ui/skeleton';
 import {
   Scissors, Plus, Trash2, Split, Gauge, Volume2, VolumeX, Download,
-  RefreshCw, Film, Music, Image as ImageIcon, Save, Play,
+  RefreshCw, Film, Music, Image as ImageIcon, Save, Play, Merge,
+  ArrowUp, ArrowDown,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { localSupabase } from '@/db/client';
@@ -60,6 +61,23 @@ function fmtTime(sec: number): string {
   const m = Math.floor(sec / 60);
   const s = sec - m * 60;
   return m > 0 ? `${m}:${s.toFixed(2).padStart(5, '0')}` : `${s.toFixed(2)}s`;
+}
+
+function formatBytes(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / (1024 ** index);
+  return `${value >= 100 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`;
+}
+
+function formatEta(seconds?: number | null) {
+  if (seconds == null || !Number.isFinite(seconds)) return '计算中';
+  if (seconds <= 0) return '0 秒';
+  if (seconds < 60) return `${Math.ceil(seconds)} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  const remain = Math.ceil(seconds % 60);
+  return remain ? `${minutes} 分 ${remain} 秒` : `${minutes} 分钟`;
 }
 
 export default function EditorPage() {
@@ -208,7 +226,38 @@ export default function EditorPage() {
   const removeSelected = async () => {
     if (!selectedClip) return;
     await runCommand({ type: 'removeClip', clipId: selectedClip.id });
+  };
+
+  // 与后一段合并。合并要求「同一素材 + 同方向 + 首尾相接」（见 lib/timeline.js），
+  // 这里先自查再发命令——能当场说清为什么合不了，比撞到服务端报错友好。
+  const handleMerge = async () => {
+    if (!selectedClip) return;
+    const track = timeline.tracks.find(t => t.clips.some(c => c.id === selectedClip.id));
+    if (!track) return;
+    const sorted = [...track.clips].sort((a, b) => a.start - b.start);
+    const idx = sorted.findIndex(c => c.id === selectedClip.id);
+    const next = sorted[idx + 1];
+    if (!next) { toast.error('后面没有相邻的片段可以合并'); return; }
+    if (next.src !== selectedClip.src) { toast.error('后一段是不同素材，不能合并'); return; }
+    if (!!next.reversed !== !!selectedClip.reversed) { toast.error('反转方向不同，不能合并'); return; }
+    await runCommand({ type: 'mergeClips', clipIdA: selectedClip.id, clipIdB: next.id });
     setSelectedClipId(null);
+  };
+
+  // 与相邻片段交换顺序。走服务端 swapClips（原子操作），
+  // 不用两次 moveClip——那会在中间留下一个两片段重叠的状态。
+  const handleSwap = async (dir: 'up' | 'down') => {
+    if (!selectedClip) return;
+    const track = timeline.tracks.find(t => t.clips.some(c => c.id === selectedClip.id));
+    if (!track) return;
+    const sorted = [...track.clips].sort((a, b) => a.start - b.start);
+    const idx = sorted.findIndex(c => c.id === selectedClip.id);
+    const other = dir === 'up' ? sorted[idx - 1] : sorted[idx + 1];
+    if (!other) {
+      toast.error(dir === 'up' ? '已经是第一个片段了' : '已经是最后一个片段了');
+      return;
+    }
+    await runCommand({ type: 'swapClips', clipIdA: selectedClip.id, clipIdB: other.id });
   };
 
   // ── 渲染导出 ─────────────────────────────────────────────
@@ -221,6 +270,10 @@ export default function EditorPage() {
     setRenderPercent(0);
     setRenderError('');
     setRenderOutput('');
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
     try {
       await ensureSaved();
       const res = await api.post<{ data: { jobId: string } }>('/api/edit/render', {
@@ -239,16 +292,19 @@ export default function EditorPage() {
           setRenderPercent(job.percent || 0);
           if (job.status === 'done') {
             if (pollRef.current) clearInterval(pollRef.current);
+            pollRef.current = null;
             setRenderStatus('done');
             setRenderOutput(job.output || '');
             toast.success('导出完成');
           } else if (job.status === 'failed') {
             if (pollRef.current) clearInterval(pollRef.current);
+            pollRef.current = null;
             setRenderStatus('failed');
             setRenderError(job.error || '渲染失败');
           }
         } catch (e) {
           if (pollRef.current) clearInterval(pollRef.current);
+          pollRef.current = null;
           setRenderStatus('failed');
           setRenderError(e instanceof Error ? e.message : String(e));
         }
@@ -265,6 +321,313 @@ export default function EditorPage() {
     if (type === 'video') return <Film className="w-4 h-4" />;
     if (type === 'audio') return <Music className="w-4 h-4" />;
     return <ImageIcon className="w-4 h-4" />;
+  };
+
+  // OpenReel Desktop 是完整剪辑能力的首选入口；旧 Web 版仅保留兼容回退。
+  const editorUrl = `${import.meta.env?.VITE_API_BASE || ''}/editor/`;
+  const apiBase = import.meta.env?.VITE_API_BASE || '';
+  const [mode, setMode] = useState<'desktop' | 'openreel' | 'simple'>('desktop');
+  const [desktopAvailable, setDesktopAvailable] = useState<boolean | null>(null);
+  const [desktopConnected, setDesktopConnected] = useState(false);
+  const [launchingDesktop, setLaunchingDesktop] = useState(false);
+  const [sendingToDesktop, setSendingToDesktop] = useState(false);
+  const [desktopImportProgress, setDesktopImportProgress] = useState<{ current: number; total: number; percent: number; name: string; loaded?: number; bytesTotal?: number; bytesPerSecond?: number; etaSeconds?: number | null } | null>(null);
+  const [failedDesktopAssets, setFailedDesktopAssets] = useState<Array<{ id: string; name: string; error: string }>>([]);
+  const desktopImportAbortRef = useRef<AbortController | null>(null);
+  const [restoredStageJobId, setRestoredStageJobId] = useState<string | null>(null);
+  const importSessionKey = projectId ? `openreel-import-session:${projectId}` : '';
+
+  useEffect(() => {
+    if (!importSessionKey) return;
+    try {
+      const saved = JSON.parse(localStorage.getItem(importSessionKey) || 'null');
+      if (Array.isArray(saved?.failed)) setFailedDesktopAssets(saved.failed);
+      if (saved?.progress) setDesktopImportProgress(saved.progress);
+      if (saved?.stageJobId && saved?.active) {
+        let stopped = false;
+        setRestoredStageJobId(saved.stageJobId);
+        const resume = async () => {
+          while (!stopped) try {
+            const res = await fetch(`${apiBase}/api/media/stage-local-file/status`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: saved.stageJobId }) });
+            const job = await res.json();
+            if (stopped || !res.ok) break;
+            setDesktopImportProgress(prev => ({ current: prev?.current || saved.progress?.current || 1, total: prev?.total || saved.progress?.total || 1, name: prev?.name || saved.progress?.name || '本地素材', percent: job.progress || 0, loaded: job.loaded || 0, bytesTotal: job.total || 0, bytesPerSecond: job.bytesPerSecond || 0, etaSeconds: job.etaSeconds }));
+            if (job.status === 'completed') {
+              setRestoredStageJobId(null);
+              localStorage.setItem(importSessionKey, JSON.stringify({ ...saved, active: false, progress: null }));
+              setDesktopImportProgress(null);
+              break;
+            }
+            if (job.status === 'failed' || job.status === 'cancelled') {
+              const failed = [...(Array.isArray(saved.failed) ? saved.failed : []), { id: saved.assetId || saved.stageJobId, name: saved.progress?.name || '本地素材', error: job.error || (job.status === 'cancelled' ? '已取消' : '导入失败') }];
+              setFailedDesktopAssets(failed);
+              localStorage.setItem(importSessionKey, JSON.stringify({ ...saved, active: false, failed }));
+              setRestoredStageJobId(null);
+              break;
+            }
+            await new Promise(resolve => setTimeout(resolve, 300));
+          } catch { break; }
+        };
+        void resume();
+        return () => { stopped = true; };
+      }
+    } catch { localStorage.removeItem(importSessionKey); }
+  }, [apiBase, importSessionKey]);
+
+  useEffect(() => {
+    if (!importSessionKey) return;
+    const current = JSON.parse(localStorage.getItem(importSessionKey) || '{}');
+    localStorage.setItem(importSessionKey, JSON.stringify({ ...current, progress: desktopImportProgress, failed: failedDesktopAssets }));
+  }, [desktopImportProgress, failedDesktopAssets, importSessionKey]);
+
+  useEffect(() => {
+    fetch(`${apiBase}/api/openreel/desktop/status`)
+      .then(r => r.ok ? r.json() : Promise.reject(new Error('status failed')))
+      .then(data => {
+        setDesktopAvailable(Boolean(data.available));
+        setDesktopConnected(Boolean(data.connected));
+      })
+      .catch(() => setDesktopAvailable(false));
+  }, [apiBase]);
+
+  const launchOpenReelDesktop = async () => {
+    setLaunchingDesktop(true);
+    try {
+      const res = await fetch(`${apiBase}/api/openreel/desktop/launch`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || '启动 OpenReel Desktop 失败');
+      setDesktopAvailable(true);
+      toast.success('OpenReel Desktop 已启动');
+      for (let i = 0; i < 20; i++) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+        const statusRes = await fetch(`${apiBase}/api/openreel/desktop/status`);
+        if (!statusRes.ok) continue;
+        const status = await statusRes.json();
+        if (status.connected) {
+          setDesktopConnected(true);
+          toast.success('已连接 OpenReel Desktop 编辑器');
+          break;
+        }
+      }
+    } catch (error) {
+      setDesktopAvailable(false);
+      toast.error(error instanceof Error ? error.message : '启动 OpenReel Desktop 失败');
+    } finally {
+      setLaunchingDesktop(false);
+    }
+  };
+
+  const sendProjectToOpenReel = async () => {
+    if (!projectId) {
+      toast.error('请先选择动画项目');
+      return;
+    }
+    setSendingToDesktop(true);
+    setFailedDesktopAssets([]);
+    const controller = new AbortController();
+    desktopImportAbortRef.current = controller;
+    try {
+      let connected = desktopConnected;
+      if (!connected) {
+        const launchRes = await fetch(`${apiBase}/api/openreel/desktop/launch`, { method: 'POST' });
+        const launchData = await launchRes.json().catch(() => ({}));
+        if (!launchRes.ok) throw new Error(launchData.error || '启动 OpenReel Desktop 失败');
+        setDesktopAvailable(true);
+        for (let i = 0; i < 30; i++) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+          const statusRes = await fetch(`${apiBase}/api/openreel/desktop/status`);
+          if (!statusRes.ok) continue;
+          const status = await statusRes.json();
+          if (status.connected) {
+            connected = true;
+            setDesktopConnected(true);
+            break;
+          }
+        }
+      }
+      if (!connected) throw new Error('OpenReel Desktop 已启动，但 MCP 服务尚未就绪，请稍后重试');
+
+      const project = projects.find(item => item.id === projectId);
+      const media = [];
+      const localFailures: Array<{ id: string; name: string; error: string }> = [];
+      for (let assetIndex = 0; assetIndex < usableAssets.length; assetIndex++) {
+        if (controller.signal.aborted) throw new DOMException('已取消导入', 'AbortError');
+        const asset = usableAssets[assetIndex];
+        if (!asset.file_url) continue;
+        setDesktopImportProgress({ current: assetIndex + 1, total: usableAssets.length, percent: 0, name: asset.name || asset.id });
+        const sourceUrl = asset.file_url;
+        let url = asset.file_url;
+        // blob: URL 只存在于当前浏览器进程。先把内容落到本地媒体目录，
+        // 再把持久化 URL 交给后端/OpenReel，避免桌面进程无法读取浏览器 Blob。
+        if (url.startsWith('blob:')) {
+          try {
+            const blob = await fetch(url).then(response => {
+              if (!response.ok) throw new Error(`HTTP ${response.status}`);
+              return response.blob();
+            });
+            const ext = asset.name?.match(/\.[A-Za-z0-9]+$/)?.[0] || ({
+              'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp',
+              'video/mp4': '.mp4', 'video/webm': '.webm',
+              'audio/mpeg': '.mp3', 'audio/wav': '.wav', 'audio/mp4': '.m4a',
+            }[blob.type] || '');
+            const fileName = asset.name || `openreel_${asset.id}${ext}`;
+            const uploadRes = await fetch(`${apiBase}/api/media/upload`, {
+              method: 'POST',
+              headers: { 'x-file-name': encodeURIComponent(fileName) },
+              body: blob,
+            });
+            const uploaded = await uploadRes.json().catch(() => ({}));
+            if (!uploadRes.ok || !uploaded.url) throw new Error(uploaded.error || 'Blob 落盘失败');
+            url = uploaded.url;
+          } catch (error) {
+            localFailures.push({ id: asset.id, name: asset.name || asset.id, error: error instanceof Error ? error.message : String(error) });
+            continue;
+          }
+        } else if (/^[A-Za-z]:[\\/]/.test(url) || url.startsWith('\\\\')) {
+          try {
+            const stageRes = await fetch(`${apiBase}/api/media/stage-local-file/start`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ path: url, name: asset.name }),
+            });
+            const staged = await stageRes.json().catch(() => ({}));
+            if (!stageRes.ok || !staged.id) throw new Error(staged.error || '本地文件暂存任务启动失败');
+            if (importSessionKey) localStorage.setItem(importSessionKey, JSON.stringify({ active: true, stageJobId: staged.id, assetId: asset.id, progress: { current: assetIndex + 1, total: usableAssets.length, percent: 0, name: asset.name || asset.id }, failed: localFailures }));
+            for (;;) {
+              if (controller.signal.aborted) {
+                await fetch(`${apiBase}/api/media/stage-local-file/cancel`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: staged.id }) }).catch(() => {});
+                throw new DOMException('已取消导入', 'AbortError');
+              }
+              await new Promise(resolve => setTimeout(resolve, 200));
+              const statusRes = await fetch(`${apiBase}/api/media/stage-local-file/status`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: staged.id }) });
+              const status = await statusRes.json().catch(() => ({}));
+              if (!statusRes.ok) throw new Error(status.error || '读取暂存进度失败');
+              setDesktopImportProgress({
+                current: assetIndex + 1, total: usableAssets.length, percent: status.progress || 0, name: asset.name || asset.id,
+                loaded: status.loaded || 0, bytesTotal: status.total || 0, bytesPerSecond: status.bytesPerSecond || 0, etaSeconds: status.etaSeconds,
+              });
+              if (status.status === 'completed') { url = status.url; break; }
+              if (status.status === 'failed' || status.status === 'cancelled') throw new Error(status.error || '本地文件暂存失败');
+            }
+            if (importSessionKey) localStorage.setItem(importSessionKey, JSON.stringify({ active: false, progress: null, failed: localFailures }));
+          } catch (error) {
+            if (error instanceof DOMException && error.name === 'AbortError') throw error;
+            localFailures.push({ id: asset.id, name: asset.name || asset.id, error: error instanceof Error ? error.message : String(error) });
+            continue;
+          }
+        }
+        media.push({ id: asset.id, name: asset.name, type: asset.asset_type, url, sourceUrl });
+      }
+      const res = await fetch(`${apiBase}/api/openreel/desktop/create-project-with-timeline`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: project?.name || timeline.name || '动画项目',
+          width: timeline.width,
+          height: timeline.height,
+          frameRate: timeline.fps,
+          media,
+          timeline,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || '创建 OpenReel 工程失败');
+      const openReelFailures = Array.isArray(data.failed)
+        ? data.failed.map((item: { id?: string; name?: string; error?: string }) => ({
+          id: item.id || item.name || 'openreel',
+          name: item.name || item.id || '素材',
+          error: item.error || 'OpenReel 导入失败',
+        }))
+        : [];
+      const allFailures = [...localFailures, ...openReelFailures];
+      setFailedDesktopAssets(allFailures);
+      if (importSessionKey) localStorage.setItem(importSessionKey, JSON.stringify({ active: false, progress: null, failed: allFailures }));
+      if (data.failedCount > 0) {
+        const examples = (data.failed || []).slice(0, 3).map((item: { name?: string; error?: string }) => `${item.name || '素材'}：${item.error || '导入失败'}`).join('；');
+        toast.warning(`OpenReel 工程已保存：成功导入 ${data.importedCount}/${data.total} 个素材，${data.failedCount} 个失败。${examples ? ` ${examples}` : ''}`, { duration: 8000 });
+      } else {
+        toast.success(`已创建并保存 OpenReel 工程：导入 ${data.importedCount} 个素材，铺入 ${data.clipCount || 0} 个片段、${data.transitionCount || 0} 个转场`);
+      }
+      if (Array.isArray(data.warnings) && data.warnings.length) toast.warning(`时间线映射有 ${data.warnings.length} 条提示：${data.warnings.slice(0, 2).join('；')}`, { duration: 8000 });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') toast.info('已取消本地素材导入');
+      else toast.error(error instanceof Error ? error.message : '发送到 OpenReel 失败');
+    } finally {
+      desktopImportAbortRef.current = null;
+      setDesktopImportProgress(null);
+      setSendingToDesktop(false);
+    }
+  };
+
+  const cancelDesktopImport = () => {
+    if (desktopImportAbortRef.current) desktopImportAbortRef.current.abort();
+    if (restoredStageJobId) {
+      void fetch(`${apiBase}/api/media/stage-local-file/cancel`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: restoredStageJobId }) });
+    }
+  };
+
+  const retryFailedDesktopImports = async () => {
+    if (!failedDesktopAssets.length) return;
+    setSendingToDesktop(true);
+    const controller = new AbortController();
+    desktopImportAbortRef.current = controller;
+    const stillFailed: Array<{ id: string; name: string; error: string }> = [];
+    const retryMedia: Array<{ id: string; name: string; type: string; url: string }> = [];
+    try {
+      for (let index = 0; index < failedDesktopAssets.length; index++) {
+        if (controller.signal.aborted) throw new DOMException('已取消重试', 'AbortError');
+        const failed = failedDesktopAssets[index];
+        const asset = usableAssets.find(item => item.id === failed.id);
+        if (!asset?.file_url || asset.file_url.startsWith('blob:')) {
+          stillFailed.push({ ...failed, error: asset?.file_url?.startsWith('blob:') ? '页面刷新后 Blob 已失效，请重新添加该素材' : '原素材已不存在' });
+          continue;
+        }
+        let url = asset.file_url;
+        setDesktopImportProgress({ current: index + 1, total: failedDesktopAssets.length, percent: 0, name: asset.name || asset.id });
+        if (/^[A-Za-z]:[\\/]/.test(url) || url.startsWith('\\\\')) {
+          try {
+            const startRes = await fetch(`${apiBase}/api/media/stage-local-file/start`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: url, name: asset.name }) });
+            const started = await startRes.json();
+            if (!startRes.ok || !started.id) throw new Error(started.error || '暂存任务启动失败');
+            for (;;) {
+              if (controller.signal.aborted) {
+                await fetch(`${apiBase}/api/media/stage-local-file/cancel`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: started.id }) }).catch(() => {});
+                throw new DOMException('已取消重试', 'AbortError');
+              }
+              await new Promise(resolve => setTimeout(resolve, 200));
+              const statusRes = await fetch(`${apiBase}/api/media/stage-local-file/status`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: started.id }) });
+              const status = await statusRes.json();
+              if (!statusRes.ok) throw new Error(status.error || '读取重试进度失败');
+              setDesktopImportProgress({ current: index + 1, total: failedDesktopAssets.length, percent: status.progress || 0, name: asset.name || asset.id, loaded: status.loaded || 0, bytesTotal: status.total || 0, bytesPerSecond: status.bytesPerSecond || 0, etaSeconds: status.etaSeconds });
+              if (status.status === 'completed') { url = status.url; break; }
+              if (status.status === 'failed' || status.status === 'cancelled') throw new Error(status.error || '本地文件暂存失败');
+            }
+          } catch (error) {
+            if (error instanceof DOMException && error.name === 'AbortError') throw error;
+            stillFailed.push({ id: asset.id, name: asset.name || asset.id, error: error instanceof Error ? error.message : String(error) });
+            continue;
+          }
+        }
+        retryMedia.push({ id: asset.id, name: asset.name || asset.id, type: asset.asset_type, url });
+      }
+      if (retryMedia.length) {
+        const res = await fetch(`${apiBase}/api/openreel/desktop/import-media`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ media: retryMedia }) });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '重试导入 OpenReel 失败');
+        for (const item of data.failed || []) stillFailed.push({ id: item.id, name: item.name || item.id, error: item.error || '导入失败' });
+      }
+      setFailedDesktopAssets(stillFailed);
+      if (importSessionKey) localStorage.setItem(importSessionKey, JSON.stringify({ active: false, progress: null, failed: stillFailed }));
+      if (stillFailed.length) toast.warning(`重试完成，仍有 ${stillFailed.length} 个素材失败`);
+      else toast.success('失败素材已全部重新导入并保存');
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') toast.info('已取消失败素材重试');
+      else toast.error(error instanceof Error ? error.message : '重试失败素材失败');
+    } finally {
+      desktopImportAbortRef.current = null;
+      setDesktopImportProgress(null);
+      setSendingToDesktop(false);
+    }
   };
 
   return (
@@ -302,18 +665,114 @@ export default function EditorPage() {
           </div>
         )}
         {renderStatus === 'failed' && (
-          <div className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded px-3 py-2">
-            导出失败：{renderError}
+          // 失败信息常常是 FFmpeg 的多行原始输出，直接塞进一行里既读不了也会撑破布局。
+          // 保留换行、等宽字体、限高可滚动。
+          <div className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded px-3 py-2 max-h-56 overflow-auto">
+            <div className="font-medium mb-1">导出失败</div>
+            <pre className="whitespace-pre-wrap font-mono text-xs leading-relaxed">{renderError}</pre>
           </div>
         )}
         {renderStatus === 'done' && renderOutput && (
           <div className="text-sm bg-green-500/10 border border-green-500/30 rounded px-3 py-2 flex items-center gap-3 flex-wrap">
             <span>导出完成：</span>
             <a className="underline" href={renderOutput} target="_blank" rel="noreferrer">预览</a>
-            <a className="underline" href={renderOutput} download>下载</a>
+            {/* 不带 download 值时文件名是服务端那串时间戳，用户拿到手认不出是哪条片子 */}
+            <a className="underline" href={renderOutput}
+               download={`${(timeline.name || '成片').replace(/[\\/:*?"<>|]/g, '_')}.mp4`}>
+              下载
+            </a>
           </div>
         )}
 
+        {/* Desktop 为主入口；Web 内嵌与简易剪辑台只作为兼容回退。 */}
+        <div className="flex items-center gap-2">
+          <Button variant={mode === 'desktop' ? 'default' : 'outline'} size="sm" onClick={() => setMode('desktop')}>
+            OpenReel Desktop
+          </Button>
+          <Button variant={mode === 'openreel' ? 'default' : 'outline'} size="sm"
+                  onClick={() => setMode('openreel')}>
+            Web 兼容版
+          </Button>
+          <Button variant={mode === 'simple' ? 'default' : 'outline'} size="sm"
+                  onClick={() => setMode('simple')}>
+            简易剪辑台
+          </Button>
+          {mode === 'desktop' && (
+            <span className="text-xs text-muted-foreground">
+              {desktopAvailable === null ? '正在检测桌面版…' : desktopConnected ? '桌面版已连接，可通过本地 MCP 控制编辑器' : desktopAvailable ? '已检测到桌面版' : '未检测到桌面版，可安装后重试'}
+            </span>
+          )}
+          {mode === 'openreel' && (
+            <span className="text-xs text-muted-foreground">
+              在浏览器本地运行，素材不会上传；可直接粘贴本项目的素材链接导入
+            </span>
+          )}
+        </div>
+
+        {mode === 'desktop' ? (
+          <Card>
+            <CardContent className="py-10 flex flex-col items-center justify-center gap-4 text-center">
+              <Scissors className="w-10 h-10 text-primary" />
+              <div>
+                <div className="font-semibold text-lg">使用 OpenReel Desktop 剪辑</div>
+                <div className="text-sm text-muted-foreground mt-1 max-w-xl">
+                  桌面版作为完整剪辑器运行。最新版 OpenReel 已提供本地 MCP 编辑接口，本项目会通过它创建/打开工程、导入素材并控制剪辑器，不再依赖未公开的命令行参数。
+                </div>
+              </div>
+              <Button onClick={launchOpenReelDesktop} disabled={launchingDesktop}>
+                {launchingDesktop ? <RefreshCw className="w-4 h-4 mr-1 animate-spin" /> : <Play className="w-4 h-4 mr-1" />}
+                {desktopAvailable ? '打开 OpenReel Desktop' : '检测并打开桌面版'}
+              </Button>
+              <Button onClick={sendProjectToOpenReel} disabled={sendingToDesktop || loadingAssets || !projectId}>
+                {sendingToDesktop ? <RefreshCw className="w-4 h-4 mr-1 animate-spin" /> : <Scissors className="w-4 h-4 mr-1" />}
+                {sendingToDesktop ? '正在创建并导入素材…' : '一键去剪辑'}
+              </Button>
+              {(sendingToDesktop || restoredStageJobId) && (
+                <Button variant="destructive" size="sm" onClick={cancelDesktopImport}>取消导入</Button>
+              )}
+              {desktopImportProgress && (
+                <div className="w-full max-w-xl text-xs space-y-1">
+                  <div className="flex justify-between gap-3">
+                    <span className="truncate">{desktopImportProgress.name}（{desktopImportProgress.current}/{desktopImportProgress.total}）</span>
+                    <span>{desktopImportProgress.percent}%</span>
+                  </div>
+                  <div className="h-2 rounded bg-muted overflow-hidden">
+                    <div className="h-full bg-primary transition-all" style={{ width: `${desktopImportProgress.percent}%` }} />
+                  </div>
+                  {(desktopImportProgress.bytesTotal || 0) > 0 && (
+                    <div className="flex flex-wrap gap-x-4 gap-y-1 text-muted-foreground">
+                      <span>已处理 {formatBytes(desktopImportProgress.loaded || 0)} / {formatBytes(desktopImportProgress.bytesTotal || 0)}</span>
+                      <span>速度 {formatBytes(desktopImportProgress.bytesPerSecond || 0)}/s</span>
+                      <span>预计剩余 {formatEta(desktopImportProgress.etaSeconds)}</span>
+                    </div>
+                  )}
+                </div>
+              )}
+              {failedDesktopAssets.length > 0 && !sendingToDesktop && (
+                <div className="w-full max-w-xl text-xs text-destructive">
+                  {failedDesktopAssets.length} 个本地素材失败。
+                  <Button variant="link" size="sm" className="h-auto px-1 text-xs" onClick={retryFailedDesktopImports}>仅重试失败素材</Button>
+                </div>
+              )}
+              <div className="text-xs text-muted-foreground">
+                将当前项目素材库中的 {usableAssets.length} 个图片、视频、音频创建为新的 OpenReel 工程并保存。
+              </div>
+              {!desktopAvailable && desktopAvailable !== null && (
+                <Button variant="ghost" size="sm" onClick={() => setMode('openreel')}>暂用 Web 兼容版</Button>
+              )}
+            </CardContent>
+          </Card>
+        ) : mode === 'openreel' ? (
+          <div className="rounded border overflow-hidden bg-background">
+            <iframe
+              title="OpenReel 剪辑台"
+              src={editorUrl}
+              className="w-full border-0"
+              style={{ height: 'calc(100vh - 260px)', minHeight: 560 }}
+              allow="autoplay; fullscreen; clipboard-read; clipboard-write"
+            />
+          </div>
+        ) : (
         <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr_300px] gap-4">
           {/* 素材 */}
           <Card>
@@ -414,6 +873,15 @@ export default function EditorPage() {
                 <Button variant="outline" size="sm" onClick={() => handleTrim('tail')} disabled={!selectedClip}>
                   裁结尾
                 </Button>
+                <Button variant="outline" size="sm" onClick={() => handleSwap('up')} disabled={!selectedClip}>
+                  <ArrowUp className="w-3 h-3 mr-1" /> 上移
+                </Button>
+                <Button variant="outline" size="sm" onClick={() => handleSwap('down')} disabled={!selectedClip}>
+                  <ArrowDown className="w-3 h-3 mr-1" /> 下移
+                </Button>
+                <Button variant="outline" size="sm" onClick={handleMerge} disabled={!selectedClip}>
+                  <Merge className="w-3 h-3 mr-1" /> 合并
+                </Button>
                 <Button variant="outline" size="sm" onClick={removeSelected} disabled={!selectedClip}>
                   <Trash2 className="w-3 h-3 mr-1" /> 删除
                 </Button>
@@ -500,6 +968,7 @@ export default function EditorPage() {
             </CardContent>
           </Card>
         </div>
+        )}
 
         <div className="text-xs text-muted-foreground flex items-center gap-1">
           <Play className="w-3 h-3" />

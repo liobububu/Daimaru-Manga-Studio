@@ -223,6 +223,22 @@ function buildRenderArgs(timeline, outputPath, { hasAudioOutput = true } = {}) {
  * 执行渲染
  * @param onProgress (percent 0-100) => void
  */
+/** 取 stderr 末尾几行：FFmpeg 的原始报错比任何包装过的文案都好定位 */
+function tailLines(s, n = 12) {
+  const lines = s.split(/\r?\n/).filter(l => l.trim());
+  return lines.slice(-n).join('\n');
+}
+
+/**
+ * 渲染超时按时间线长度算，而不是一律 30 分钟。
+ * 素材损坏时 FFmpeg 会反复报错又不退出，固定长超时意味着用户要干等半小时
+ * 才知道失败；3 秒的片子不该等 30 分钟。
+ */
+function renderTimeoutMs(duration) {
+  const sec = Math.min(45 * 60, Math.max(90, (duration || 0) * 20 + 120));
+  return sec * 1000;
+}
+
 function render(timeline, outputPath, { onProgress, onStderr } = {}) {
   return new Promise((resolve, reject) => {
     const { args, duration } = buildRenderArgs(timeline, outputPath);
@@ -234,12 +250,16 @@ function render(timeline, outputPath, { onProgress, onStderr } = {}) {
     let stderr = '';
     let finished = false;
 
+    const timeoutMs = renderTimeoutMs(duration);
     const timer = setTimeout(() => {
       if (finished) return;
       finished = true;
       child.kill('SIGKILL');
-      reject(new EditError('render_timeout', '渲染超时（30 分钟），已终止'));
-    }, 30 * 60 * 1000);
+      const why = tailLines(stderr, 8);
+      reject(new EditError('render_timeout',
+        `渲染超时（${Math.round(timeoutMs / 1000)} 秒），已终止。` +
+        (why ? `\nFFmpeg 最后的输出：\n${why}` : '')));
+    }, timeoutMs);
 
     child.stderr.on('data', buf => {
       stderr += buf.toString();
@@ -306,7 +326,12 @@ function probeMedia(src) {
       const duration = m ? Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]) : null;
       // Stream #0:1(und): Audio: aac ...
       const hasAudio = /Stream #\d+:\d+.*:\s*Audio:/.test(stderr);
-      resolve({ duration, hasAudio });
+      // 顺手记下解码错误。素材损坏时渲染会卡很久才失败，
+      // 提前告诉用户「哪个素材坏了」比让他等超时有用得多。
+      const errors = stderr.split(/\r?\n/)
+        .filter(l => /Invalid data|IEND without|Error submitting packet|moov atom not found|Invalid argument|No such file/i.test(l))
+        .slice(0, 3);
+      resolve({ duration, hasAudio, errors });
     });
   });
 }

@@ -15,6 +15,7 @@ output
 
 # 打包产物（exe 84MB + 内嵌 FFmpeg 79MB，绝不入库）
 dist-exe/
+dist-release/
 
 # 打包中间产物（脚本本身要保留，只排除生成物）
 build/bundled-server.cjs
@@ -57,3 +58,6 @@ history/*.json
 /tasks
 .native-wind-cache
 .vite
+
+# OpenReel 剪辑台的构建产物（59MB，可从源码重建）
+editor-dist/

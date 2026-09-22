@@ -89,6 +89,12 @@ function addClip(timeline, clip) {
   const start = typeof clip.start === 'number'
     ? num(clip.start, 'start')
     : track.clips.reduce((max, c) => Math.max(max, c.start + c.duration), 0);
+  const sourceStart = num(clip.sourceStart ?? 0, 'sourceStart');
+  const speed = num(clip.speed ?? 1, 'speed');
+  const volume = num(clip.volume ?? 1, 'volume');
+  if (sourceStart < 0) throw new EditError('invalid_source_start', 'sourceStart 不能为负');
+  if (speed <= 0) throw new EditError('invalid_speed', 'speed 必须大于 0');
+  if (volume < 0) throw new EditError('invalid_volume', 'volume 不能为负');
 
   const next = {
     id: clip.id || `clip_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
@@ -98,15 +104,14 @@ function addClip(timeline, clip) {
     name: clip.name || '',
     start: Math.max(0, start),
     duration,
-    sourceStart: clip.sourceStart ?? 0,
-    speed: clip.speed ?? 1,
+    sourceStart,
+    speed,
     reversed: !!clip.reversed,
     muted: !!clip.muted,
-    volume: clip.volume ?? 1,
+    volume,
     transitionIn: clip.transitionIn || null, // { type: 'fade'|'slide'|'none', duration }
   };
 
-  if (next.speed <= 0) throw new EditError('invalid_speed', 'speed 必须大于 0');
   if (next.duration <= 0) throw new EditError('invalid_duration', 'duration 必须大于 0');
   if (!next.src) throw new EditError('missing_src', '片段缺少 src（素材路径）');
 
@@ -168,8 +173,11 @@ function trimClip(timeline, clipId, edge, targetDuration) {
   const { clip } = assertClip(timeline, clipId);
   const target = num(targetDuration, '目标时长');
   if (target <= 0) throw new EditError('invalid_duration', '裁剪后时长必须大于 0');
-  if (target > clip.duration && edge === 'tail') {
-    throw new EditError('trim_overflow', 'tail 裁剪不能超过片段原有长度');
+  if (edge !== 'head' && edge !== 'tail') {
+    throw new EditError('invalid_trim_edge', '裁剪方向必须是 head 或 tail');
+  }
+  if (target > clip.duration) {
+    throw new EditError('trim_overflow', '裁剪后时长不能超过片段原有长度');
   }
 
   if (edge === 'head') {
@@ -219,6 +227,42 @@ function mergeClips(timeline, clipIdA, clipIdB) {
   return merged;
 }
 
+/**
+ * 交换同一轨道内两个相邻片段的顺序。
+ *
+ * 为什么单独成一条命令而不是让前端调两次 moveClip：
+ * 两次调用之间会存在一个「两片段重叠」的中间状态，只是没人看到而已——
+ * 命令要么整体生效要么整体拒绝，不该有中间态。
+ */
+function swapClips(timeline, clipIdA, clipIdB) {
+  const a = assertClip(timeline, clipIdA);
+  const b = assertClip(timeline, clipIdB);
+  if (a.track !== b.track) {
+    throw new EditError('swap_cross_track', '只能交换同一轨道内的片段');
+  }
+  const adjacent = Math.abs(a.clip.start + a.clip.duration - b.clip.start) < 1e-6
+    || Math.abs(b.clip.start + b.clip.duration - a.clip.start) < 1e-6;
+  if (!adjacent) {
+    throw new EditError('swap_not_adjacent', '两个片段在时间线上不相邻，无法交换顺序');
+  }
+
+  const aStart = a.clip.start;
+  const bStart = b.clip.start;
+  const aDur = a.clip.duration;
+  const bDur = b.clip.duration;
+
+  if (aStart < bStart) {
+    b.clip.start = aStart;
+    a.clip.start = aStart + bDur;
+  } else {
+    a.clip.start = bStart;
+    b.clip.start = bStart + aDur;
+  }
+  a.track.clips.sort((x, y) => x.start - y.start);
+  timeline.updatedAt = new Date().toISOString();
+  return a.clip;
+}
+
 /** 设置速度：时间线时长按 speed 反比缩放，源窗口不变 */
 function setSpeed(timeline, clipId, speed) {
   const { clip } = assertClip(timeline, clipId);
@@ -251,6 +295,33 @@ function patchClip(timeline, clipId, patch) {
       const v = num(patch.volume, 'volume');
       if (v < 0) throw new EditError('invalid_volume', 'volume 不能为负');
       clip.volume = v;
+    } else if (key === 'transitionIn') {
+      const transition = patch.transitionIn;
+      if (transition == null) {
+        clip.transitionIn = null;
+      } else {
+        if (typeof transition !== 'object' || Array.isArray(transition)) {
+          throw new EditError('invalid_transition', 'transitionIn 必须是对象或 null');
+        }
+        if (!['fade', 'slide', 'none'].includes(transition.type)) {
+          throw new EditError('invalid_transition', '不支持的转场类型');
+        }
+        const duration = num(transition.duration, 'transitionIn.duration');
+        if (duration < 0 || duration > clip.duration) {
+          throw new EditError('invalid_transition', '转场时长必须在 0 到片段时长之间');
+        }
+        clip.transitionIn = { type: transition.type, duration };
+      }
+    } else if (key === 'muted' || key === 'reversed') {
+      if (typeof patch[key] !== 'boolean') {
+        throw new EditError('invalid_boolean', `${key} 必须是布尔值`);
+      }
+      clip[key] = patch[key];
+    } else if (key === 'name') {
+      if (typeof patch.name !== 'string') {
+        throw new EditError('invalid_name', 'name 必须是字符串');
+      }
+      clip.name = patch.name;
     } else {
       clip[key] = patch[key];
     }
@@ -277,6 +348,7 @@ function applyCommand(timeline, cmd) {
     case 'mergeClips': return mergeClips(timeline, cmd.clipIdA, cmd.clipIdB);
     case 'setSpeed': return setSpeed(timeline, cmd.clipId, cmd.speed);
     case 'moveClip': return moveClip(timeline, cmd.clipId, cmd.start);
+    case 'swapClips': return swapClips(timeline, cmd.clipIdA, cmd.clipIdB);
     case 'patchClip': return patchClip(timeline, cmd.clipId, cmd.patch);
     default: throw new EditError('unknown_command', `未知命令 ${cmd.type}`);
   }
@@ -292,6 +364,7 @@ module.exports = {
   mergeClips,
   setSpeed,
   moveClip,
+  swapClips,
   patchClip,
   timelineDuration,
   applyCommand,

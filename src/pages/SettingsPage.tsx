@@ -11,6 +11,7 @@ import { Settings as SettingsIcon, Trash2, HardDrive, Download, Palette } from '
 import { toast } from 'sonner';
 import { getAppSettings, updateAppSetting } from '@/services/api';
 import { ASPECT_RATIO_OPTIONS, PLATFORM_OPTIONS } from '@/types/types';
+import { db } from '@/db/client';
 
 const LANGUAGES = [{ value: 'zh-CN', label: '简体中文' }, { value: 'en-US', label: 'English' }];
 const IMAGE_FORMATS = [{ value: 'png', label: 'PNG（无损）' }, { value: 'jpg', label: 'JPG（压缩）' }, { value: 'webp', label: 'WebP' }];
@@ -83,7 +84,6 @@ export default function SettingsPage() {
 
   async function handleClear() {
     try {
-      const { db } = await import('@/db/client');
       if (clearType === 'failed') {
         await db.from('video_tasks').delete().in('status', ['failed', 'expired', 'timeout']);
         toast.success('已清理失败任务');

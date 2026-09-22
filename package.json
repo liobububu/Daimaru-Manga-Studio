@@ -16,7 +16,7 @@
     "format": "biome format --write",
     "server": "node local/server.js",
     "build:exe": "node build/build-exe.mjs",
-    "test:local": "node local/test/smoke.js && node local/test/render-e2e.js && node local/test/render-accuracy.js && python local/test/api-smoke.py",
+    "test:local": "node local/test/smoke.js && node local/test/render-e2e.js && node local/test/render-accuracy.js && node local/test/api-smoke.js",
     "test:ui": "node local/test/ui-smoke.js"
   },
   "dependencies": {

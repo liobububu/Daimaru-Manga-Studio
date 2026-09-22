@@ -201,22 +201,9 @@ async function catalog() {
  * 用户同步来的图片模型就用不了图片生成，还得自己进配置页一个个改。
  * 这是猜测，猜错了用户在模型配置页改一下即可（手动改过的能力不会被覆盖）。
  */
-function guessCapabilities(modelId) {
-  const id = String(modelId || '').toLowerCase();
-  if (/dall|image|flux|stable-?diffusion|sd(xl)?[-_]|midjourney|ideogram|kolors|seedream/.test(id)) {
-    return ['image_generation'];
-  }
-  if (/whisper|asr|speech-?to-?text|sensevoice|fun-?asr/.test(id)) {
-    return ['audio_recognition'];
-  }
-  if (/tts|text-?to-?speech|speech-?synth/.test(id)) {
-    return ['tts', 'audio_generation'];
-  }
-  if (/embedding|rerank|moderation/.test(id)) {
-    return []; // 这类模型不用于内容生成，留空避免误选
-  }
-  return ['text_generation'];
-}
+// 能力判断与前端共用一份规则（shared/capabilities.js），
+// 别在这里再写一遍 —— 两边规则不一致时，同一模型前端显示能用、服务端存的却是别的。
+const { detectCapabilities: guessCapabilities } = require('../../shared/capabilities');
 
 /** 从上游 /models 同步模型列表 */
 async function models(body) {

@@ -47,6 +47,19 @@ if (!fs.existsSync(path.join(DIST, 'index.html'))) {
 }
 const embeddedAssets = collectAssets(DIST);
 
+// 剪辑台（OpenReel Video）是独立构建的，挂在 editor/ 前缀下由 server.js 的
+// serveEditor 读取——键名必须带 editor/ 前缀，和那边对应。
+const EDITOR_DIST = path.join(ROOT, 'editor-dist');
+if (fs.existsSync(path.join(EDITOR_DIST, 'index.html'))) {
+  const editorAssets = collectAssets(EDITOR_DIST);
+  for (const [rel, b64] of Object.entries(editorAssets)) {
+    embeddedAssets[`editor/${rel}`] = b64;
+  }
+  console.log(`  剪辑台资源 ${Object.keys(editorAssets).length} 个文件`);
+} else {
+  console.log('  ⚠ 未找到 editor-dist/，完整剪辑台将不可用（简易剪辑台不受影响）');
+}
+
 const bundled = bundle({
   entry: path.join(ROOT, 'local', 'sea-entry.js'),
   localDir: path.join(ROOT, 'local'),

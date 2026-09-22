@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
+import { db } from '@/db/client';
 
 // ── 类型定义 ──────────────────────────────────────────────────────────────────
 export interface MediaItem {
@@ -125,8 +126,6 @@ async function compressImage(file: File): Promise<Blob> {
 
 // ── 辅助：上传文件到本地媒体目录 ──────────────────────────────────────────────
 async function uploadFile(file: File, kind: MediaKind): Promise<string> {
-  const { db } = await import('@/db/client');
-
   let blob: Blob = file;
   if (kind === 'image') blob = await compressImage(file);
 

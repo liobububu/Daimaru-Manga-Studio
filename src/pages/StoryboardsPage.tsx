@@ -69,6 +69,7 @@ export default function StoryboardsPage() {
   const [editShot, setEditShot] = useState<Storyboard | null>(null);
   const [editOpen, setEditOpen] = useState(false);
   const [deleteId, setDeleteId] = useState<string | null>(null);
+  const [selectedShotIds, setSelectedShotIds] = useState<Set<string>>(new Set());
 
   // 音频生成状态：{ [storyboardId_type]: 'generating' | 'done' | 'error' }
   const [audioGenStates] = useState<Record<string, 'generating' | 'done' | 'error'>>({});
@@ -200,6 +201,28 @@ ${scriptInput}
     setStoryboards(prev => prev.filter(s => s.id !== deleteId));
     setDeleteId(null);
     toast.success('已删除');
+  }
+
+  function toggleShotSelection(id: string) {
+    setSelectedShotIds(prev => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+  }
+
+  function selectedShots() { return storyboards.filter(s => selectedShotIds.has(s.id)); }
+
+  function batchGoToImages() {
+    const shots = selectedShots();
+    if (!shots.length) { toast.error('请先选择分镜'); return; }
+    const first = shots.find(s => !s.image_asset_id) || shots[0];
+    navigate('/images', { state: { storyboard: first, storyboardQueue: shots.map(s => s.id) } });
+    toast.info(`已带入 ${shots.length} 个分镜，先处理第 ${first.shot_index} 镜`);
+  }
+
+  function batchGoToVideos() {
+    const shots = selectedShots();
+    if (!shots.length) { toast.error('请先选择分镜'); return; }
+    const first = shots.find(s => !s.video_asset_id) || shots[0];
+    navigate('/videos', { state: { storyboard: first, storyboardQueue: shots.map(s => s.id) } });
+    toast.info(`已带入 ${shots.length} 个分镜，先处理第 ${first.shot_index} 镜`);
   }
 
   async function handleSaveEdit() {
@@ -343,9 +366,16 @@ ${scriptInput}
         <div>
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-sm font-semibold text-muted-foreground">{storyboards.length} 个分镜</h2>
-            <Button size="sm" variant="secondary" onClick={handleAddShot}>
-              <Plus className="w-4 h-4 mr-1" />新增分镜
-            </Button>
+            <div className="flex items-center gap-2 flex-wrap justify-end">
+              {selectedShotIds.size > 0 && <>
+                <span className="text-xs text-muted-foreground">已选 {selectedShotIds.size} 镜</span>
+                <Button size="sm" variant="secondary" onClick={batchGoToImages}>批量生图</Button>
+                <Button size="sm" variant="secondary" onClick={batchGoToVideos}>批量出片</Button>
+                <Button size="sm" variant="ghost" onClick={() => setSelectedShotIds(new Set())}>取消选择</Button>
+              </>}
+              <Button size="sm" variant="secondary" onClick={() => setSelectedShotIds(new Set(storyboards.map(s => s.id)))}>全选</Button>
+              <Button size="sm" variant="secondary" onClick={handleAddShot}><Plus className="w-4 h-4 mr-1" />新增分镜</Button>
+            </div>
           </div>
 
           {loading ? (
@@ -360,10 +390,11 @@ ${scriptInput}
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {storyboards.map(s => (
-                <Card key={s.id} className="bg-card border-border hover:border-primary/30 transition-colors">
+                <Card key={s.id} className={`bg-card border-border hover:border-primary/30 transition-colors ${selectedShotIds.has(s.id) ? 'ring-1 ring-primary border-primary/50' : ''}`}>
                   <CardContent className="p-4">
                     <div className="flex items-start justify-between gap-2 mb-3">
                       <div className="flex items-center gap-2">
+                        <input type="checkbox" className="accent-primary" checked={selectedShotIds.has(s.id)} onChange={() => toggleShotSelection(s.id)} aria-label={`选择分镜 ${s.shot_index}`} />
                         <div className="w-8 h-8 rounded-lg bg-primary/20 flex items-center justify-center shrink-0">
                           <span className="text-primary text-sm font-bold">{s.shot_index}</span>
                         </div>

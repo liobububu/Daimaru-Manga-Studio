@@ -15,7 +15,10 @@ const media = require('./media');
 const TABLE = 'timelines';
 
 /** 渲染任务（单用户本地版，内存态足够；重启后旧任务状态丢失不影响数据） */
+// 渲染任务表。只增不删的话，用得久了会一直堆着（每个还带着最多 4KB 的 FFmpeg 输出）。
+// Map 保持插入顺序，超上限就丢最早的——轮询早就不问它们了。
 const jobs = new Map();
+const MAX_JOBS = 50;
 
 async function listTimelines() {
   const rows = await store.readTable(TABLE);
@@ -139,12 +142,21 @@ async function render(body) {
     if (track.type !== 'video') continue;
     for (const clip of track.clips) {
       if (/^https?:/i.test(clip.src)) { clip.hasAudio = true; continue; } // 远端交给 FFmpeg 自己处理
-      if (ffmpegLib.isImage(clip.src)) { clip.hasAudio = false; continue; }
+      const isImg = ffmpegLib.isImage(clip.src);
       try {
         const info = await ffmpegLib.probeMedia(clip.src);
-        clip.hasAudio = info.hasAudio !== false;
-      } catch {
-        clip.hasAudio = true; // 探测不了就按有音轨处理，让 FFmpeg 给出真实错误
+        clip.hasAudio = isImg ? false : info.hasAudio !== false;
+        // 素材损坏要在这里就拦下：渲染时 FFmpeg 会反复报错又不退出，
+        // 用户只能干等到超时；这里直接说清是哪一个素材坏了。
+        if (info.errors && info.errors.length) {
+          throw Object.assign(
+            new Error(`素材无法解码：${clip.src}\n${info.errors.join('\n')}`),
+            { status: 400 },
+          );
+        }
+      } catch (e) {
+        if (e.status === 400) throw e;
+        clip.hasAudio = isImg ? false : true; // 探测不了就按默认处理，让 FFmpeg 给出真实错误
       }
     }
   }
@@ -158,6 +170,9 @@ async function render(body) {
   const jobId = `job_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
   const job = { id: jobId, status: 'running', percent: 0, output: null, error: null, startedAt: Date.now() };
   jobs.set(jobId, job);
+  while (jobs.size > MAX_JOBS) {
+    jobs.delete(jobs.keys().next().value);
+  }
 
   // 渲染是重活，放到后台跑，前端靠 jobId 轮询
   (async () => {

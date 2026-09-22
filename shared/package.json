@@ -1,0 +1,6 @@
+{
+  "name": "donghua-shared",
+  "private": true,
+  "description": "前端与服务端共用的常量与规则。根 package.json 是 ESM（前端构建用），这里显式声明 CommonJS 以便服务端 require。",
+  "type": "commonjs"
+}

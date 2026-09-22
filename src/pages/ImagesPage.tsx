@@ -18,8 +18,10 @@ import { Badge } from '@/components/ui/badge';
 import { Image, Sparkles, Download, Copy, Star, StarOff, Trash2, X, ZoomIn, ZoomOut, Maximize, Video, Plus, LibraryBig } from 'lucide-react';
 import { toast } from 'sonner';
 import { useProject } from '@/contexts/ProjectContext';
-import { createAsset, getAssets, deleteAsset, updateAsset } from '@/services/api';
+import { db } from '@/db/client';
+import { createAsset, getAssets, deleteAsset, updateAsset, updateStoryboard } from '@/services/api';
 import type { Asset, Storyboard } from '@/types/types';
+import { creativeAssetSuggestions, insertCreativeAssetToken, resolveCreativeAssetRefs } from '@/lib/creativeAssetRefs';
 import { ASPECT_RATIO_OPTIONS } from '@/types/types';
 
 const IMAGE_STYLES = ['写实', '动漫', '水彩', '油画', '扁平插画', '赛博朋克', '国风', '像素'];
@@ -60,6 +62,7 @@ export default function ImagesPage() {
   const [modelId, setModelId] = useState('');
   const [apiConfigId, setApiConfigId] = useState('');
   const [saveToLibrary, setSaveToLibrary] = useState(true);
+  const [storyboardBoundAssetId, setStoryboardBoundAssetId] = useState<string | null>(null);
 
   // 生成结果（本次生成的图片 URL）
   const [generatedImages, setGeneratedImages] = useState<Array<{ url: string; assetId?: string }>>([]);
@@ -78,7 +81,6 @@ export default function ImagesPage() {
     if (refAssetId) {
       // 查询素材详情后填入
       (async () => {
-        const { db } = await import('@/db/client');
         const { data } = await db.from('assets').select('*').eq('id', refAssetId).single();
         if (data) setRefImage({ assetId: data.id, url: data.file_url || data.thumbnail_url || '', name: data.name });
       })();
@@ -87,6 +89,7 @@ export default function ImagesPage() {
 
   useEffect(() => {
     if (passedStoryboard?.image_prompt) setPrompt(passedStoryboard.image_prompt);
+    setStoryboardBoundAssetId(passedStoryboard?.image_asset_id || null);
   }, [passedStoryboard]);
 
   const loadAssets = useCallback(async () => {
@@ -108,10 +111,13 @@ export default function ImagesPage() {
     if (genMode === 'image2image' && !refImage?.url) { toast.error('图生图模式请先选择或上传参考图片'); return; }
     if (genMode === 'multi_reference' && refImages.length < 1) { toast.error('多图参考模式请至少添加一张参考图片'); return; }
 
+    const creativeRefs = resolveCreativeAssetRefs(prompt, assets);
+    const creativeImages: ImageValue[] = creativeRefs
+      .filter(ref => ref.asset.file_url || ref.asset.thumbnail_url)
+      .map(ref => ({ url: ref.asset.file_url || ref.asset.thumbnail_url || '', assetId: ref.asset.id, name: ref.asset.name }));
     setGenerating(true);
     setGeneratedImages([]);
     try {
-      const { db } = await import('@/db/client');
       const body: Record<string, unknown> = {
         apiConfigId,
         modelId,
@@ -122,7 +128,10 @@ export default function ImagesPage() {
         style: imgStyle,
         mode: genMode,
       };
-      if (genMode === 'image2image') {
+      if (creativeImages.length) {
+        body.referenceImageUrls = [...creativeImages, ...refImages].map(item => item.url);
+        body.referenceAssetIds = [...creativeImages, ...refImages].map(item => item.assetId).filter(Boolean);
+      } else if (genMode === 'image2image') {
         body.referenceImageUrl = refImage?.url;
         body.referenceImageAssetId = refImage?.assetId;
       } else if (genMode === 'multi_reference') {
@@ -162,6 +171,11 @@ export default function ImagesPage() {
       }
 
       setGeneratedImages(generated);
+      if (passedStoryboard?.id && generated[0]?.assetId) {
+        await updateStoryboard(passedStoryboard.id, { image_asset_id: generated[0].assetId });
+        setStoryboardBoundAssetId(generated[0].assetId);
+        toast.success('首张生成图已绑定到对应分镜');
+      }
       toast.success(`成功生成 ${images.length} 张图片`);
     } catch (e) {
       toast.error(`生成失败: ${e instanceof Error ? e.message : '未知错误'}`);
@@ -173,8 +187,9 @@ export default function ImagesPage() {
   async function handleSaveToLibrary(imgUrl: string) {
     if (!selectedProjectId) { toast.error('请先选择项目'); return; }
     try {
-      await createAsset({
+      const asset = await createAsset({
         project_id: selectedProjectId,
+        storyboard_id: passedStoryboard?.id,
         asset_type: 'image',
         name: `图片_${Date.now()}`,
         file_url: imgUrl,
@@ -183,6 +198,10 @@ export default function ImagesPage() {
         source_module: 'image_generation',
         favorite: false,
       });
+      if (passedStoryboard?.id) {
+        await updateStoryboard(passedStoryboard.id, { image_asset_id: asset.id });
+        setStoryboardBoundAssetId(asset.id);
+      }
       await loadAssets();
       toast.success('已保存到素材库');
     } catch { toast.error('保存失败'); }
@@ -195,6 +214,15 @@ export default function ImagesPage() {
       // 没有 assetId 时先提示
       toast.info('请先将图片保存到素材库，再进入视频生成');
     }
+  }
+
+  async function handleBindToStoryboard(assetId: string) {
+    if (!passedStoryboard?.id) return;
+    try {
+      await updateStoryboard(passedStoryboard.id, { image_asset_id: assetId });
+      setStoryboardBoundAssetId(assetId);
+      toast.success('已设为该分镜的主图');
+    } catch { toast.error('绑定分镜失败'); }
   }
 
   async function handleDelete(id: string) {
@@ -330,6 +358,21 @@ export default function ImagesPage() {
             <div><Label>提示词 *</Label>
               <Textarea className="mt-1" rows={3} value={prompt} onChange={e => setPrompt(e.target.value)}
                 placeholder={passedStoryboard ? `从分镜导入：${passedStoryboard.image_prompt}` : '描述要生成的画面内容，支持中英文...'} />
+              {creativeAssetSuggestions(prompt, assets).length > 0 && (
+                <div className="flex gap-1 flex-wrap mt-1 rounded border border-border p-1.5">
+                  {creativeAssetSuggestions(prompt, assets).map(asset => (
+                    <button key={asset.id} type="button" className="text-xs px-2 py-1 rounded bg-muted hover:bg-accent"
+                      onClick={() => setPrompt(value => insertCreativeAssetToken(value, asset.name))}>
+                      @{asset.name}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {resolveCreativeAssetRefs(prompt, assets).length > 0 && (
+                <div className="flex gap-1 flex-wrap mt-1">
+                  {resolveCreativeAssetRefs(prompt, assets).map(ref => <Badge key={ref.asset.id} variant="secondary">@{ref.asset.name} · {ref.category === 'character' ? '角色' : ref.category === 'scene' ? '场景' : '道具'}</Badge>)}
+                </div>
+              )}
             </div>
             <div><Label>负面提示词（可选）</Label>
               <Textarea className="mt-1" rows={2} value={negativePrompt} onChange={e => setNegativePrompt(e.target.value)} placeholder="不希望出现的内容..." />
@@ -363,6 +406,14 @@ export default function ImagesPage() {
                     >
                       <Video className="w-3 h-3" />用此图生成视频
                     </button>
+                    {passedStoryboard?.id && img.assetId && (
+                      <button
+                        className="w-full py-1 rounded bg-black/40 hover:bg-black/70 text-white text-xs"
+                        onClick={() => handleBindToStoryboard(img.assetId!)}
+                      >
+                        {storyboardBoundAssetId === img.assetId ? '✓ 当前分镜主图' : '设为分镜主图'}
+                      </button>
+                    )}
                     <div className="flex gap-1">
                       <button className="flex-1 py-1 rounded bg-black/40 hover:bg-black/70 text-white text-xs flex items-center justify-center gap-1"
                         onClick={() => { setPreview(img.url); setZoom(1); }}>
@@ -382,6 +433,9 @@ export default function ImagesPage() {
                   </div>
                   {img.assetId && (
                     <Badge className="absolute top-1 left-1 text-xs bg-green-600/80 text-white border-0">已存库</Badge>
+                  )}
+                  {img.assetId && storyboardBoundAssetId === img.assetId && (
+                    <Badge className="absolute top-1 right-1 text-xs bg-primary/90 text-primary-foreground border-0">分镜主图</Badge>
                   )}
                 </div>
               ))}

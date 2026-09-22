@@ -9,6 +9,8 @@ import { Upload, LibraryBig, X, Loader2, Image as ImageIcon } from 'lucide-react
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import type { Asset } from '@/types/types';
+import { db } from '@/db/client';
+import { createAsset } from '@/services/api';
 
 export interface ImageValue {
   assetId?: string;     // 素材库 asset.id
@@ -87,7 +89,6 @@ export default function ImageInputField({
 
     setUploading(true);
     try {
-      const { db } = await import('@/db/client');
       const { compressed, blob, sizeMB } = await compressImage(file);
 
       // 文件名只保留字母数字，避免 Storage 路径问题
@@ -105,7 +106,6 @@ export default function ImageInputField({
       const publicUrl = urlData?.publicUrl || '';
 
       // 同步保存到 assets 表
-      const { createAsset } = await import('@/services/api');
       const asset = await createAsset({
         project_id: projectId || '',
         asset_type: 'image',

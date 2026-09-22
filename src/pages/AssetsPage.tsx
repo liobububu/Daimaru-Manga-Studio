@@ -14,6 +14,7 @@ import { useProject } from '@/contexts/ProjectContext';
 import { getAssets, updateAsset, deleteAsset, createAsset } from '@/services/api';
 import type { Asset } from '@/types/types';
 import { ASSET_TYPE_LABELS } from '@/types/types';
+import { db } from '@/db/client';
 
 const TYPE_OPTIONS = [
   { value: 'all', label: '全部类型' },
@@ -21,6 +22,13 @@ const TYPE_OPTIONS = [
   { value: 'video', label: '视频' },
   { value: 'audio', label: '音频' },
   { value: 'text', label: '文本' },
+];
+const CREATIVE_CATEGORIES = [
+  { value: 'all', label: '全部用途' },
+  { value: 'character', label: '角色资产' },
+  { value: 'scene', label: '场景资产' },
+  { value: 'prop', label: '道具资产' },
+  { value: 'uncategorized', label: '未分类' },
 ];
 
 const typeColors: Record<string, string> = {
@@ -38,6 +46,7 @@ export default function AssetsPage() {
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('all');
+  const [categoryFilter, setCategoryFilter] = useState('all');
   const [previewAsset, setPreviewAsset] = useState<Asset | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
@@ -55,7 +64,9 @@ export default function AssetsPage() {
   useEffect(() => { load(); }, [load]);
 
   const filtered = assets.filter(a =>
-    a.name.toLowerCase().includes(search.toLowerCase()),
+    a.name.toLowerCase().includes(search.toLowerCase()) &&
+    (categoryFilter === 'all' ||
+      (categoryFilter === 'uncategorized' ? !a.metadata?.category : a.metadata?.category === categoryFilter)),
   );
 
   async function handleDelete(id: string) {
@@ -70,6 +81,15 @@ export default function AssetsPage() {
     setAssets(prev => prev.map(a => a.id === id ? { ...a, name: renameValue } : a));
     setRenamingId(null);
     toast.success('已重命名');
+  }
+
+  async function setCreativeCategory(asset: Asset, category?: 'character' | 'scene' | 'prop') {
+    const metadata = { ...(asset.metadata || {}) };
+    if (category) metadata.category = category;
+    else delete metadata.category;
+    await updateAsset(asset.id, { metadata });
+    setAssets(prev => prev.map(item => item.id === asset.id ? { ...item, metadata } : item));
+    toast.success(category ? '已加入创作资产分类' : '已取消创作资产分类');
   }
 
   function handleDownload(a: Asset) {
@@ -101,7 +121,6 @@ export default function AssetsPage() {
           file.type.startsWith('video/') ? 'video' :
           file.type.startsWith('audio/') ? 'audio' : 'other';
         // 上传到本地媒体目录
-        const { db } = await import('@/db/client');
         const path = `${selectedProjectId}/${Date.now()}_${file.name}`;
         const { data: uploadData } = await db.storage.from('assets').upload(path, file);
         if (uploadData) {
@@ -152,6 +171,10 @@ export default function AssetsPage() {
             <SelectTrigger className="w-36 shrink-0"><SelectValue /></SelectTrigger>
             <SelectContent>{TYPE_OPTIONS.map(o => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}</SelectContent>
           </Select>
+          <Select value={categoryFilter} onValueChange={setCategoryFilter}>
+            <SelectTrigger className="w-36 shrink-0"><SelectValue /></SelectTrigger>
+            <SelectContent>{CREATIVE_CATEGORIES.map(o => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}</SelectContent>
+          </Select>
         </div>
 
         {!selectedProjectId ? (
@@ -190,6 +213,11 @@ export default function AssetsPage() {
                   <Badge className={`absolute top-1 left-1 text-xs ${typeColors[a.asset_type] || typeColors.other}`} variant="outline">
                     {ASSET_TYPE_LABELS[a.asset_type] || a.asset_type}
                   </Badge>
+                  {typeof a.metadata?.category === 'string' && (
+                    <Badge className="absolute top-1 right-1 text-xs bg-black/70 text-white border-0">
+                      {a.metadata.category === 'character' ? '角色' : a.metadata.category === 'scene' ? '场景' : a.metadata.category === 'prop' ? '道具' : a.metadata.category}
+                    </Badge>
+                  )}
                   {/* 悬停操作 */}
                   <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-between p-2">
                     <div className="flex justify-end gap-1">
@@ -209,6 +237,14 @@ export default function AssetsPage() {
                     {/* 图片素材快捷操作 */}
                     {a.asset_type === 'image' && (
                       <div className="flex flex-col gap-1">
+                        <div className="grid grid-cols-3 gap-1">
+                          {(['character','scene','prop'] as const).map(category => (
+                            <button key={category} className={`py-1 rounded text-[10px] ${a.metadata?.category === category ? 'bg-primary text-primary-foreground' : 'bg-black/50 hover:bg-black/80 text-white'}`}
+                              onClick={() => setCreativeCategory(a, a.metadata?.category === category ? undefined : category)}>
+                              {category === 'character' ? '角色' : category === 'scene' ? '场景' : '道具'}
+                            </button>
+                          ))}
+                        </div>
                         <button
                           className="w-full py-1 rounded bg-primary/90 hover:bg-primary text-primary-foreground text-xs flex items-center justify-center gap-1 font-medium"
                           onClick={() => navigate(`/videos?mode=image_to_video&reference_asset_id=${a.id}${selectedProjectId ? `&project_id=${selectedProjectId}` : ''}`)}

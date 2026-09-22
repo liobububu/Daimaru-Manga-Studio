@@ -23,10 +23,12 @@ import {
   Loader2, RefreshCw, LibraryBig, Layers,
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { db } from '@/db/client';
 import { useProject } from '@/contexts/ProjectContext';
-import { createVideoTask, getVideoTasks, updateVideoTask, createAsset } from '@/services/api';
-import type { VideoTask, Storyboard, ModelCapability } from '@/types/types';
+import { createVideoTask, getVideoTasks, updateVideoTask, createAsset, updateStoryboard, getAssets } from '@/services/api';
+import type { VideoTask, Storyboard, ModelCapability, Asset } from '@/types/types';
 import { VIDEO_STATUS_LABELS } from '@/types/types';
+import { creativeAssetRole, creativeAssetSuggestions, insertCreativeAssetToken, resolveCreativeAssetRefs } from '@/lib/creativeAssetRefs';
 
 // ── 轮询间隔与超时设置 ─────────────────────────────────────────────────────
 const POLL_INTERVAL_MS = 5000;
@@ -165,6 +167,7 @@ export default function VideosPage() {
   const [audios, setAudios] = useState<MediaItem[]>([]);
   // 风格参考图（video_style 模式可选）
   const [styleRefImages, setStyleRefImages] = useState<MediaItem[]>([]);
+  const [projectImages, setProjectImages] = useState<Asset[]>([]);
 
   const [modelId, setModelId]         = useState('');
   const [apiConfigId, setApiConfigId] = useState('');
@@ -173,6 +176,12 @@ export default function VideosPage() {
 
   const passedStoryboard = (location.state as { storyboard?: Storyboard })?.storyboard;
   const modeConfig = MODE_MAP[mode] || VIDEO_MODES[0];
+  const creativeRefs = resolveCreativeAssetRefs(prompt, projectImages);
+
+  useEffect(() => {
+    if (!selectedProjectId) { setProjectImages([]); return; }
+    getAssets(selectedProjectId, 'image').then(setProjectImages).catch(() => setProjectImages([]));
+  }, [selectedProjectId]);
 
   // ── URL 参数预填入 ────────────────────────────────────────────────────────
   useEffect(() => {
@@ -196,7 +205,6 @@ export default function VideosPage() {
 
     if (refAssetId) {
       (async () => {
-        const { db } = await import('@/db/client');
         const { data } = await db.from('assets').select('*').eq('id', refAssetId).single();
         if (data) {
           const item: MediaItem = { id: `init_${refAssetId}`, asset_id: data.id, url: data.file_url || data.thumbnail_url || '', name: data.name, role: 'reference', weight: 1 };
@@ -206,7 +214,6 @@ export default function VideosPage() {
     }
     if (audioAssetId) {
       (async () => {
-        const { db } = await import('@/db/client');
         const { data } = await db.from('assets').select('*').eq('id', audioAssetId).single();
         if (data) {
           const item: MediaItem = { id: `init_${audioAssetId}`, asset_id: data.id, url: data.file_url || '', name: data.name, role: 'driver', weight: 1 };
@@ -216,7 +223,6 @@ export default function VideosPage() {
     }
     if (videoAssetId) {
       (async () => {
-        const { db } = await import('@/db/client');
         const { data } = await db.from('assets').select('*').eq('id', videoAssetId).single();
         if (data) {
           const item: MediaItem = { id: `init_${videoAssetId}`, asset_id: data.id, url: data.file_url || '', name: data.name, role: 'source', weight: 1 };
@@ -231,7 +237,6 @@ export default function VideosPage() {
     if (passedStoryboard?.video_prompt) setPrompt(passedStoryboard.video_prompt);
     if (passedStoryboard?.image_asset_id) {
       (async () => {
-        const { db } = await import('@/db/client');
         const { data } = await db.from('assets').select('*').eq('id', passedStoryboard.image_asset_id).single();
         if (data) {
           const item: MediaItem = { id: `sb_${data.id}`, asset_id: data.id, url: data.file_url || data.thumbnail_url || '', name: data.name, role: 'reference', weight: 1 };
@@ -270,7 +275,6 @@ export default function VideosPage() {
     if (active.length > 0) {
       if (pollingRef.current) clearInterval(pollingRef.current);
       pollingRef.current = setInterval(async () => {
-        const { db } = await import('@/db/client');
         for (const task of active) {
           try {
             const upstreamTaskId = task.upstream_video_id || task.upstream_task_id;
@@ -304,6 +308,7 @@ export default function VideosPage() {
                   favorite: false,
                 });
                 if (asset) updates.result_asset_id = asset.id;
+                if (asset && task.storyboard_id) await updateStoryboard(task.storyboard_id, { video_asset_id: asset.id });
                 toast.success('视频已生成并保存到素材库');
               } else if (data.videoUrl) {
                 toast.success('视频生成完成');
@@ -349,10 +354,13 @@ export default function VideosPage() {
     if (err) { toast.error(err); return; }
     setSubmitting(true);
     try {
-      const { db } = await import('@/db/client');
-
+      const promptImages: MediaItem[] = creativeRefs
+        .filter(ref => ref.asset.file_url || ref.asset.thumbnail_url)
+        .filter(ref => !images.some(item => item.asset_id === ref.asset.id))
+        .map(ref => ({ id: `creative_${ref.asset.id}`, asset_id: ref.asset.id, url: ref.asset.file_url || ref.asset.thumbnail_url || '', name: ref.asset.name, role: creativeAssetRole(ref.category), weight: 1 }));
+      const effectiveImages = mode === 'keyframes' ? images : [...images, ...promptImages];
       const inputsPayload = {
-        images: images.map((it, i) => ({ asset_id: it.asset_id, url: it.url, role: it.role || 'reference', weight: it.weight || 1, sort_order: i })),
+        images: effectiveImages.map((it, i) => ({ asset_id: it.asset_id, url: it.url, role: it.role || 'reference', weight: it.weight || 1, sort_order: i })),
         videos: videos.map((it, i) => ({ asset_id: it.asset_id, url: it.url, role: it.role || 'source', weight: it.weight || 1, sort_order: i })),
         audios: audios.map((it, i) => ({ asset_id: it.asset_id, url: it.url, role: it.role || 'driver', weight: it.weight || 1, sort_order: i })),
       };
@@ -372,7 +380,7 @@ export default function VideosPage() {
       };
 
       const sourceAssetIds = [
-        ...images.map(i => i.asset_id).filter(Boolean),
+        ...effectiveImages.map(i => i.asset_id).filter(Boolean),
         ...videos.map(v => v.asset_id).filter(Boolean),
         ...audios.map(a => a.asset_id).filter(Boolean),
       ] as string[];
@@ -382,8 +390,8 @@ export default function VideosPage() {
         negativePrompt: negPrompt.trim() || undefined,
         mode, inputs: inputsPayload, params: paramsPayload,
         // 旧版兼容字段（后端可能仍读取）
-        imageUrl:   images[0]?.url,
-        imageUrls:  images.map(i => i.url),
+        imageUrl:   effectiveImages[0]?.url,
+        imageUrls:  effectiveImages.map(i => i.url),
         width, height,
         numFrames:  fps !== '' ? Number(fps) : undefined,
         frameRate:  fps !== '' ? Number(fps) : undefined,
@@ -441,8 +449,8 @@ export default function VideosPage() {
         params:              paramsPayload,
         source_asset_ids:    sourceAssetIds,
         // 旧版兼容
-        reference_image_url: images[0]?.url,
-        reference_image_asset_id: images[0]?.asset_id,
+        reference_image_url: effectiveImages[0]?.url,
+        reference_image_asset_id: effectiveImages[0]?.asset_id,
         first_frame_url:     images.find(i => i.role === 'first_frame')?.url,
         first_frame_asset_id: images.find(i => i.role === 'first_frame')?.asset_id,
         last_frame_url:      images.find(i => i.role === 'last_frame')?.url,
@@ -484,7 +492,8 @@ export default function VideosPage() {
   async function handleAddToLibrary(task: VideoTask) {
     if (!task.video_url || !selectedProjectId) return;
     try {
-      await createAsset({ project_id: selectedProjectId, asset_type: 'video', name: `视频_${Date.now()}`, file_url: task.video_url, thumbnail_url: task.thumbnail_url || '', prompt: task.prompt || '', source_module: 'video_generation', favorite: false });
+      const asset = await createAsset({ project_id: selectedProjectId, storyboard_id: task.storyboard_id, asset_type: 'video', name: `视频_${Date.now()}`, file_url: task.video_url, thumbnail_url: task.thumbnail_url || '', prompt: task.prompt || '', source_module: 'video_generation', favorite: false });
+      if (task.storyboard_id) await updateStoryboard(task.storyboard_id, { video_asset_id: asset.id });
       toast.success('已添加到素材库');
     } catch { toast.error('添加失败'); }
   }
@@ -642,6 +651,21 @@ export default function VideosPage() {
                 <Textarea className="mt-1" rows={3} value={prompt}
                   onChange={e => setPrompt(e.target.value)}
                   placeholder={passedStoryboard ? `分镜提示词：${passedStoryboard.video_prompt}` : '描述视频内容、场景、动作、风格…'} />
+                {creativeAssetSuggestions(prompt, projectImages).length > 0 && (
+                  <div className="flex gap-1 flex-wrap mt-1 rounded border border-border p-1.5">
+                    {creativeAssetSuggestions(prompt, projectImages).map(asset => (
+                      <button key={asset.id} type="button" className="text-xs px-2 py-1 rounded bg-muted hover:bg-accent"
+                        onClick={() => setPrompt(value => insertCreativeAssetToken(value, asset.name))}>
+                        @{asset.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {creativeRefs.length > 0 && (
+                  <div className="flex gap-1 flex-wrap mt-1">
+                    {creativeRefs.map(ref => <Badge key={ref.asset.id} variant="secondary">@{ref.asset.name} · {ref.category === 'character' ? '角色参考' : ref.category === 'scene' ? '场景参考' : '道具参考'}</Badge>)}
+                  </div>
+                )}
               </div>
             )}
 

@@ -15,8 +15,8 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useProject } from '@/contexts/ProjectContext';
-import { getComicDrafts, createComicDraft, updateComicDraft } from '@/services/api';
-import type { ComicDraft, CanvasConfig, CanvasElement } from '@/types/types';
+import { getComicDrafts, createComicDraft, updateComicDraft, getAssets, getScripts, getStoryboards } from '@/services/api';
+import type { ComicDraft, CanvasConfig, CanvasElement, Asset, Script, Storyboard } from '@/types/types';
 
 type ElementType = 'image' | 'text' | 'bubble' | 'rect' | 'divider';
 type BubbleShape = 'speech' | 'thought' | 'exclamation' | 'narration';
@@ -30,6 +30,12 @@ const BUBBLE_SHAPES: { value: BubbleShape; label: string }[] = [
 
 const FONT_SIZES = [10, 12, 14, 16, 18, 20, 24, 28, 32, 36];
 const DEFAULT_CANVAS_WIDTH = 750;
+const COMIC_PRESETS = [
+  { label: '小红书竖图', width: 1080, height: 1440 },
+  { label: '公众号长图', width: 900, height: 2400 },
+  { label: '手机条漫', width: 1080, height: 3000 },
+  { label: '方形四格', width: 1080, height: 1080 },
+];
 
 function BubbleSvg({ shape, text, color = '#fff', bg = '#222' }: { shape: BubbleShape; text: string; color?: string; bg?: string }) {
   const common = { fill: bg, stroke: '#555', strokeWidth: 1 };
@@ -132,6 +138,10 @@ export default function ComicEditorPage() {
   const [exportQuality, setExportQuality] = useState(90);
   const [newDraftOpen, setNewDraftOpen] = useState(false);
   const [draftName, setDraftName] = useState('');
+  const [projectImages, setProjectImages] = useState<Asset[]>([]);
+  const [scripts, setScripts] = useState<Script[]>([]);
+  const [storyboards, setStoryboards] = useState<Storyboard[]>([]);
+  const [sourceScriptId, setSourceScriptId] = useState('');
   const canvasRef = useRef<HTMLDivElement>(null);
   const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -142,6 +152,9 @@ export default function ComicEditorPage() {
   useEffect(() => {
     if (selectedProjectId) {
       getComicDrafts(selectedProjectId).then(setDrafts).catch(() => {});
+      getAssets(selectedProjectId, 'image').then(setProjectImages).catch(() => setProjectImages([]));
+      getScripts(selectedProjectId).then(setScripts).catch(() => setScripts([]));
+      getStoryboards(selectedProjectId).then(setStoryboards).catch(() => setStoryboards([]));
     }
   }, [selectedProjectId]);
 
@@ -205,6 +218,42 @@ export default function ComicEditorPage() {
     setSelectedId(null);
   }
 
+  function duplicateElement(el: CanvasElement) {
+    const id = `el_${Date.now()}`;
+    setElements(prev => [...prev, { ...el, id, x: el.x + 20, y: el.y + 20, z_index: prev.length + 1, locked: false }]);
+    setSelectedId(id);
+  }
+
+  function addProjectImage(asset: Asset) {
+    if (!asset.file_url) return;
+    const id = `el_${Date.now()}`;
+    setElements(prev => [...prev, { id, type: 'image', x: 40, y: 40, width: config.width - 80, height: Math.min(600, config.width), rotation: 0, opacity: 1, z_index: prev.length + 1, locked: false, content: asset.file_url }]);
+    setSelectedId(id);
+  }
+
+  function buildComicFromStoryboards() {
+    const source = sourceScriptId ? storyboards.filter(item => item.script_id === sourceScriptId) : storyboards;
+    if (!source.length) { toast.error('当前项目没有可用分镜'); return; }
+    const gap = 24;
+    const panelWidth = config.width - gap * 2;
+    const panelHeight = Math.round(panelWidth * 0.72);
+    const next: CanvasElement[] = [];
+    source.slice(0, 30).forEach((shot, index) => {
+      const top = gap + index * (panelHeight + 110 + gap);
+      const image = shot.image_asset_id ? projectImages.find(asset => asset.id === shot.image_asset_id) : undefined;
+      next.push({ id: `panel_${shot.id}`, type: 'rect', x: gap, y: top, width: panelWidth, height: panelHeight, rotation: 0, opacity: 1, z_index: next.length + 1, locked: false, background_color: '#18181b', color: '#3f3f46' });
+      if (image?.file_url) next.push({ id: `image_${shot.id}`, type: 'image', x: gap, y: top, width: panelWidth, height: panelHeight, rotation: 0, opacity: 1, z_index: next.length + 1, locked: false, content: image.file_url });
+      const caption = [shot.dialogue, shot.voiceover].filter(Boolean).join('\n');
+      if (caption) next.push({ id: `caption_${shot.id}`, type: 'bubble', x: gap + 30, y: top + panelHeight - 95, width: panelWidth - 60, height: 80, rotation: 0, opacity: 1, z_index: next.length + 1, locked: false, content: caption, bubble_shape: shot.dialogue ? 'speech' : 'narration', color: '#ffffff', background_color: '#111827', font_size: 16 });
+      const description = shot.visual_description || shot.character_action;
+      if (!image?.file_url && description) next.push({ id: `desc_${shot.id}`, type: 'text', x: gap + 24, y: top + 30, width: panelWidth - 48, height: panelHeight - 60, rotation: 0, opacity: 1, z_index: next.length + 1, locked: false, content: description, color: '#d4d4d8', font_size: 18, text_align: 'center', line_height: 1.5 });
+    });
+    setConfig(current => ({ ...current, height: Math.max(1200, gap + source.slice(0, 30).length * (panelHeight + 110 + gap)) }));
+    setElements(next);
+    setSelectedId(null);
+    toast.success(`已按 ${Math.min(source.length, 30)} 个分镜生成条漫初稿`);
+  }
+
   function moveZ(id: string, dir: 'up' | 'down') {
     const el = elements.find(e => e.id === id);
     if (!el) return;
@@ -212,9 +261,17 @@ export default function ComicEditorPage() {
   }
 
   async function handleExport() {
-    // 使用 html2canvas or simple screenshot approach
-    toast.info('导出功能：将在完整版中接入 html2canvas 实现长图导出');
-    setExportOpen(false);
+    if (!canvasRef.current) return;
+    try {
+      const images = elements.filter(el => el.type === 'image' && el.content);
+      if (images.some(el => String(el.content).startsWith('http'))) {
+        toast.info('当前长图含网络图片。为避免浏览器跨域导致导出缺图，请先将图片加入本地素材库后再导出。');
+        return;
+      }
+      toast.info('长图导出渲染器正在完善；项目素材复用和版式能力已先补齐。');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '导出失败');
+    }
   }
 
   return (
@@ -280,6 +337,7 @@ export default function ComicEditorPage() {
                   <Button variant="ghost" size="sm" onClick={() => moveZ(selectedEl.id, 'up')}><ChevronUp className="w-4 h-4" /></Button>
                   <Button variant="ghost" size="sm" onClick={() => moveZ(selectedEl.id, 'down')}><ChevronDown className="w-4 h-4" /></Button>
                   <Button variant="ghost" size="sm" onClick={() => updateElement(selectedEl.id, { locked: true })}><Lock className="w-4 h-4" /></Button>
+                  <Button variant="ghost" size="sm" onClick={() => duplicateElement(selectedEl)}>复制</Button>
                   <Button variant="ghost" size="sm" className="text-destructive" onClick={() => deleteElement(selectedEl.id)}><Trash2 className="w-4 h-4" /></Button>
                 </>
               )}
@@ -287,6 +345,20 @@ export default function ComicEditorPage() {
                 <Button variant="ghost" size="sm" onClick={() => updateElement(selectedEl.id, { locked: false })}><Unlock className="w-4 h-4" /></Button>
               )}
             </div>
+            {activeDraft && (
+              <div className="flex items-center gap-2 flex-wrap rounded-lg border border-border bg-card/60 p-2 shrink-0">
+                <span className="text-xs font-medium">从项目生成条漫：</span>
+                <Select value={sourceScriptId || 'all'} onValueChange={v => setSourceScriptId(v === 'all' ? '' : v)}>
+                  <SelectTrigger className="h-8 w-48 text-xs"><SelectValue placeholder="全部分镜" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">全部项目分镜</SelectItem>
+                    {scripts.map(script => <SelectItem key={script.id} value={script.id}>{script.title}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+                <Button size="sm" onClick={buildComicFromStoryboards} disabled={!storyboards.length}>自动排成条漫初稿</Button>
+                <span className="text-[11px] text-muted-foreground">优先使用分镜已绑定图片，并自动带入对白/旁白；没有图片时保留画面描述占位。</span>
+              </div>
+            )}
 
             {/* 画布 */}
             {activeDraft ? (
@@ -446,6 +518,31 @@ export default function ComicEditorPage() {
                   <div><Label className="text-xs">宽度 (px)</Label><Input className="mt-0.5 h-7 text-xs" type="number" value={config.width} onChange={e => setConfig(c => ({ ...c, width: Number(e.target.value) }))} /></div>
                   <div><Label className="text-xs">高度 (px)</Label><Input className="mt-0.5 h-7 text-xs" type="number" value={config.height} onChange={e => setConfig(c => ({ ...c, height: Number(e.target.value) }))} /></div>
                   <div><Label className="text-xs">背景色</Label><Input className="mt-0.5 h-8" type="color" value={config.backgroundColor} onChange={e => setConfig(c => ({ ...c, backgroundColor: e.target.value }))} /></div>
+                  <div>
+                    <Label className="text-xs">常用尺寸</Label>
+                    <div className="grid grid-cols-2 gap-1 mt-1">
+                      {COMIC_PRESETS.map(preset => (
+                        <Button key={preset.label} variant="secondary" size="sm" className="h-auto py-1 text-[10px]"
+                          onClick={() => setConfig(c => ({ ...c, width: preset.width, height: preset.height }))}>
+                          {preset.label}
+                        </Button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="pt-1">
+                    <h4 className="text-xs text-muted-foreground mb-1">项目图片素材</h4>
+                    {projectImages.length === 0 ? <p className="text-xs text-muted-foreground">项目暂无图片素材</p> : (
+                      <div className="grid grid-cols-2 gap-1 max-h-52 overflow-y-auto">
+                        {projectImages.slice(0, 30).map(asset => (
+                          <button key={asset.id} className="rounded border border-border overflow-hidden bg-muted/30 text-left"
+                            onClick={() => addProjectImage(asset)} title={asset.name}>
+                            <img src={asset.thumbnail_url || asset.file_url} alt="" className="w-full aspect-square object-cover" />
+                            <div className="text-[10px] truncate px-1 py-0.5">{asset.name}</div>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                   <div className="pt-1">
                     <h4 className="text-xs text-muted-foreground mb-1 flex items-center gap-1"><Layers className="w-3 h-3" />元素列表</h4>
                     {elements.length === 0 ? <p className="text-xs text-muted-foreground">暂无元素</p> : (

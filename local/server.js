@@ -17,6 +17,7 @@ const dbRoutes = require('./routes/db');
 const aiRoutes = require('./routes/ai');
 const mediaRoutes = require('./routes/media');
 const editRoutes = require('./routes/edit');
+const openReelDesktop = require('./lib/openreel-desktop');
 
 const PORT = Number(process.env.PORT || 5178);
 const MAX_BODY = 512 * 1024 * 1024; // 上传媒体需要较大上限
@@ -62,6 +63,13 @@ const MIME = {
   '.webp': 'image/webp',
   '.gif': 'image/gif',
   '.ico': 'image/x-icon',
+  '.wasm': 'application/wasm',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.otf': 'font/otf',
+  '.data': 'application/octet-stream',
+  '.map': 'application/json; charset=utf-8',
   '.woff': 'font/woff',
   '.woff2': 'font/woff2',
   '.mp4': 'video/mp4',
@@ -116,6 +124,45 @@ async function serveStatic(req, res, pathname) {
 }
 
 /**
+ * 剪辑台（OpenReel Video）的资源。
+ * 打包成 exe 后走内联资源，开发时从 editor-dist/ 读。
+ */
+function readEditorAsset(rel) {
+  const embedded = global.__DH_ASSETS__;
+  if (embedded && embedded[`editor/${rel}`]) {
+    return Buffer.from(embedded[`editor/${rel}`], 'base64');
+  }
+  const file = path.join(store.appRoot(), 'editor-dist', rel);
+  try {
+    return fs.readFileSync(file);
+  } catch {
+    return null;
+  }
+}
+
+/** 托管剪辑台，非资源路径一律回退到它的 index.html（SPA） */
+async function serveEditor(req, res, pathname) {
+  const rel = pathname.replace(/^\/+/, '').replace(/^editor\/?/, '') || 'index.html';
+  const safeRel = path.normalize(rel).replace(/^(\.\.[/\\])+/, '').replace(/\\/g, '/');
+
+  let buf = readEditorAsset(safeRel);
+  if (buf === null) buf = readEditorAsset('index.html');
+
+  if (buf === null) {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('未找到剪辑台资源（editor-dist/）。请先按 README 构建 OpenReel Video。');
+    return;
+  }
+
+  res.writeHead(200, {
+    'Content-Type': MIME[path.extname(safeRel).toLowerCase()] || 'application/octet-stream',
+    'Content-Length': buf.length,
+    'Cache-Control': safeRel.startsWith('assets/') ? 'max-age=31536000' : 'no-cache',
+  });
+  res.end(buf);
+}
+
+/**
  * 本地服务的安全底线：浏览器里任何网页都能往 127.0.0.1 发请求，
  * 所以写操作必须校验 Origin —— 否则用户浏览网页时，那个网页能静默删掉他的项目数据。
  * 没有 Origin 的请求（curl、程序自身）放行。
@@ -134,6 +181,22 @@ function originOk(req) {
 const routes = {
   'POST /api/db': dbRoutes.query,
   'GET /api/health': () => ({ ok: true, dataDir: store.resolveDataDir() }),
+  'GET /api/openreel/desktop/status': () => openReelDesktop.status(),
+  'POST /api/openreel/desktop/launch': () => openReelDesktop.launch(),
+  'GET /api/openreel/desktop/tools': () => openReelDesktop.listTools(),
+  'POST /api/openreel/desktop/tool': body => openReelDesktop.callTool(body?.name, body?.args || {}),
+  'POST /api/openreel/desktop/create-project': (body, ctx) => openReelDesktop.createProjectWithMedia({
+    ...(body || {}),
+    localOrigin: `http://127.0.0.1:${ctx.req.socket.localPort}`,
+  }),
+  'POST /api/openreel/desktop/create-project-with-timeline': (body, ctx) => openReelDesktop.createProjectWithTimeline({
+    ...(body || {}),
+    localOrigin: `http://127.0.0.1:${ctx.req.socket.localPort}`,
+  }),
+  'POST /api/openreel/desktop/import-media': (body, ctx) => openReelDesktop.importMediaIntoCurrentProject({
+    ...(body || {}),
+    localOrigin: `http://127.0.0.1:${ctx.req.socket.localPort}`,
+  }),
 
   'POST /api/ai/generate': aiRoutes.generate,
   'POST /api/ai/image': aiRoutes.image,
@@ -146,6 +209,11 @@ const routes = {
 
   'POST /api/media/upload': mediaRoutes.upload,
   'POST /api/media/save-generated': mediaRoutes.saveGenerated,
+  'POST /api/media/stage-local-file': body => mediaRoutes.stageLocalFile(body?.path, body?.name),
+  'POST /api/media/stage-local-file/start': body => mediaRoutes.createStageJob(body?.path, body?.name),
+  'POST /api/media/stage-local-file/status': body => mediaRoutes.getStageJob(body?.id),
+  'POST /api/media/stage-local-file/cancel': body => mediaRoutes.cancelStageJob(body?.id),
+  'GET /api/media/stage-local-file/jobs': () => mediaRoutes.listStageJobs(),
 
   'POST /api/edit/timeline/save': editRoutes.saveTimeline,
   'GET /api/edit/timelines': editRoutes.listTimelines,
@@ -169,6 +237,11 @@ const server = http.createServer(async (req, res) => {
 
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const pathname = url.pathname;
+
+  // 剪辑台（OpenReel Video）：独立构建的前端应用，托管在 /editor/ 下
+  if (pathname === '/editor' || pathname.startsWith('/editor/')) {
+    return serveEditor(req, res, pathname);
+  }
 
   // 媒体文件访问
   if (pathname.startsWith('/api/files/')) {

@@ -214,11 +214,55 @@ async function main() {
       }
       check('点击后切到剪辑台且内容渲染', switched);
 
+      // 默认进的是完整剪辑台（OpenReel，iframe 隔离加载）
+      let frame = null;
+      for (let i = 0; i < 30; i++) {
+        frame = await cdp.eval(`
+          const f = document.querySelector('iframe[title="OpenReel 剪辑台"]');
+          if (!f) return null;
+          const d = f.contentDocument;
+          return {
+            src: f.getAttribute('src') || '',
+            h: f.clientHeight,
+            ready: d ? d.readyState : 'none',
+            bodyLen: d && d.body ? d.body.innerHTML.length : 0,
+          };
+        `).catch(() => null);
+        if (frame && frame.ready === 'complete' && frame.bodyLen > 200) break;
+        await sleep(400);
+      }
+      check('完整剪辑台 iframe 已加载', !!frame, '未找到 iframe');
+      if (frame) {
+        check('iframe 指向本地 /editor/（同源，不经外网）',
+          /\/editor\/$/.test(frame.src), frame.src);
+        check('OpenReel 文档已加载（同源可直查）',
+          frame.ready === 'complete' && frame.bodyLen > 200,
+          `ready=${frame.ready} body=${frame.bodyLen}B`);
+      }
+
+      // 切到简易剪辑台，验证那些与本地素材库打通的按钮
+      await cdp.eval(`
+        const b = Array.from(document.querySelectorAll('button'))
+          .find(x => x.textContent.includes('简易剪辑台'));
+        if (b) b.click();
+        return !!b;
+      `);
+      await sleep(600);
+
       const clipPanel = await cdp.eval(`
         const t = document.body.innerText;
         return t.includes('时间线') && t.includes('素材');
       `);
-      check('剪辑台含时间线与素材面板', clipPanel);
+      check('简易剪辑台含时间线与素材面板', clipPanel);
+
+      // 剪辑操作按钮必须真的渲染出来（服务端实现了但前端没入口，等于功能不存在）
+      const btns = await cdp.eval(`
+        const labels = ['分割', '裁开头', '裁结尾', '上移', '下移', '合并', '删除', '导出成片'];
+        const text = document.body.innerText;
+        return labels.filter(l => !text.includes(l));
+      `);
+      check('剪辑操作按钮齐全（分割/裁剪/排序/合并/删除/导出）',
+        (btns || []).length === 0, `缺失: ${(btns || []).join('、')}`);
     }
 
     // 切到模型配置页（验证 OpenAI 兼容配置界面）

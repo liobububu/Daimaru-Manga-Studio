@@ -19,6 +19,7 @@ const store = require('../lib/store');
 const timeline = require('../lib/timeline');
 const openai = require('../lib/openai');
 const { buildRenderArgs } = require('../lib/ffmpeg');
+const media = require('../routes/media');
 
 // 用临时目录，不污染真实数据
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'donghua-smoke-'));
@@ -85,7 +86,7 @@ test('head trim 到头后不再推进（源偏移不为负）', () => {
 test('tail trim 不能超过原长', () => {
   const tl = timeline.createTimeline();
   const clip = timeline.addClip(tl, { type: 'video', src: '/a.mp4', duration: 10 });
-  assert.throws(() => timeline.trimClip(tl, clip.id, 'tail', 20), /tail 裁剪不能超过片段原有长度/);
+  assert.throws(() => timeline.trimClip(tl, clip.id, 'tail', 20), /不能超过片段原有长度/);
 });
 
 test('NaN / Infinity 一律被拒绝', () => {
@@ -94,6 +95,29 @@ test('NaN / Infinity 一律被拒绝', () => {
   assert.throws(() => timeline.splitClip(tl, clip.id, Number.NaN), /不是有效数字/);
   assert.throws(() => timeline.setSpeed(tl, clip.id, Number.POSITIVE_INFINITY), /不是有效数字/);
   assert.throws(() => timeline.addClip(tl, { type: 'video', src: '/b.mp4', duration: Number.NaN }), /不是有效数字/);
+});
+
+test('新增片段会拒绝非法 sourceStart / speed / volume', () => {
+  const tl = timeline.createTimeline();
+  assert.throws(() => timeline.addClip(tl, { type: 'video', src: '/a.mp4', duration: 2, sourceStart: 'abc' }), /有效数字/);
+  assert.throws(() => timeline.addClip(tl, { type: 'video', src: '/a.mp4', duration: 2, speed: 0 }), /speed 必须大于 0/);
+  assert.throws(() => timeline.addClip(tl, { type: 'video', src: '/a.mp4', duration: 2, volume: -1 }), /volume 不能为负/);
+});
+
+test('裁剪不能反向扩大片段，且裁剪方向必须合法', () => {
+  const tl = timeline.createTimeline();
+  const clip = timeline.addClip(tl, { type: 'video', src: '/a.mp4', duration: 4 });
+  assert.throws(() => timeline.trimClip(tl, clip.id, 'head', 5), /不能超过片段原有长度/);
+  assert.throws(() => timeline.trimClip(tl, clip.id, 'middle', 2), /head 或 tail/);
+  assert.strictEqual(clip.duration, 4, '失败的裁剪不能修改片段');
+});
+
+test('patchClip 严格校验布尔值与转场参数', () => {
+  const tl = timeline.createTimeline();
+  const clip = timeline.addClip(tl, { type: 'video', src: '/a.mp4', duration: 4 });
+  assert.throws(() => timeline.patchClip(tl, clip.id, { muted: 'false' }), /布尔值/);
+  assert.throws(() => timeline.patchClip(tl, clip.id, { transitionIn: { type: 'fade', duration: 9 } }), /转场时长/);
+  assert.throws(() => timeline.patchClip(tl, clip.id, { transitionIn: { type: 'spin', duration: 1 } }), /转场类型/);
 });
 
 test('setSpeed 保持源窗口不变、时间线时长按倍率缩放', () => {
@@ -124,6 +148,42 @@ test('merge 相邻同向片段后时长相加', () => {
   const merged = timeline.mergeClips(tl, a.id, b.id);
   assert.strictEqual(merged.duration, 8);
   assert.strictEqual(tl.tracks[0].clips.length, 1, '合并后应只剩一个片段');
+});
+
+test('swap 相邻片段后顺序互换、总时长不变', () => {
+  const tl = timeline.createTimeline();
+  const a = timeline.addClip(tl, { type: 'video', src: '/a.mp4', duration: 2, start: 0 });
+  const b = timeline.addClip(tl, { type: 'video', src: '/b.mp4', duration: 3, start: 2 });
+  timeline.swapClips(tl, a.id, b.id);
+  assert.strictEqual(b.start, 0, 'b 应该换到前面');
+  assert.strictEqual(a.start, 3, 'a 应该换到后面（3 = 0 + b 的时长）');
+  assert.strictEqual(timeline.timelineDuration(tl), 5, '总时长不该变');
+});
+
+test('swap 拒绝不相邻的片段', () => {
+  const tl = timeline.createTimeline();
+  const a = timeline.addClip(tl, { type: 'video', src: '/a.mp4', duration: 2, start: 0 });
+  const b = timeline.addClip(tl, { type: 'video', src: '/b.mp4', duration: 1, start: 2 });
+  const c = timeline.addClip(tl, { type: 'video', src: '/c.mp4', duration: 1, start: 3 });
+  assert.throws(() => timeline.swapClips(tl, a.id, c.id), /不相邻/);
+});
+
+// 模型能力判断：规则数据在 shared/capability-rules.json，前端与服务端共用。
+// 这条测试守的是服务端这一侧；改规则时前端会跟着变，所以改完要跑一遍全链路确认同步结果。
+test('能力判断按规则累加（共享规则表）', () => {
+  const { detectCapabilities } = require('../../shared/capabilities');
+  assert.deepStrictEqual(detectCapabilities('gpt-4o'), ['text_generation']);
+  assert.deepStrictEqual(detectCapabilities('dall-e-3'), ['image_generation']);
+  assert.deepStrictEqual(detectCapabilities('kling-v1'), ['video_generation']);
+  assert.ok(detectCapabilities('tts-1').includes('audio_generation'));
+  assert.ok(detectCapabilities('whisper-1').includes('audio_recognition'));
+  // 多命中的要累加，不能只取第一条
+  assert.ok(detectCapabilities('gpt-4-vision').includes('text_generation'));
+  assert.ok(detectCapabilities('gpt-4-vision').includes('multimodal'));
+  // 不用于生成的模型应为空，避免被误选去生成内容
+  assert.deepStrictEqual(detectCapabilities('text-embedding-3-large'), []);
+  // 认不出的模型退回默认，而不是空
+  assert.deepStrictEqual(detectCapabilities('my-custom-model'), ['text_generation']);
 });
 
 test('未知命令被拒绝', () => {
@@ -213,6 +273,159 @@ section('数据层');
 
   assert.throws(() => store.safeName('bad;drop'), /非法的表名/);
   test('表名防注入', () => {});
+
+  test('媒体磁盘路径不能越出 media 目录', () => {
+    const ok = media.toDiskPath('/api/files/video/a.mp4');
+    assert.ok(ok && ok.includes(path.join('media', 'video', 'a.mp4')));
+    assert.strictEqual(media.toDiskPath('/api/files/../tables/projects.json'), null);
+    assert.strictEqual(media.toDiskPath('../master.key'), null);
+  });
+
+  test('本地媒体只能桥接 data/media 内文件到 loopback URL', () => {
+    const file = path.join(store.resolveDataDir(), 'media', 'video', 'bridge.mp4');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, 'test');
+    assert.strictEqual(media.toLoopbackUrl('/api/files/video/bridge.mp4', 'http://127.0.0.1:5199'), 'http://127.0.0.1:5199/api/files/video/bridge.mp4');
+    assert.strictEqual(media.toLoopbackUrl('../master.key', 'http://127.0.0.1:5199'), null);
+    assert.strictEqual(media.toLoopbackUrl('/api/files/video/bridge.mp4', 'http://example.com:5199'), null);
+  });
+
+  test('文件名编码兼容中文、空格与百分号编码', () => {
+    assert.strictEqual(media.sanitizeFileName('测试%20视频.mp4'), '测试_视频.mp4');
+    assert.strictEqual(media.sanitizeFileName('测试 视频.mp4'), '测试_视频.mp4');
+    assert.strictEqual(media.sanitizeFileName('../危险.mp4'), '危险.mp4');
+  });
+
+  test('绝对本地文件会暂存到受控 media 目录', async () => {
+    const sourceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'donghua-local-media-'));
+    const source = path.join(sourceDir, '中文 大文件.mp4');
+    fs.writeFileSync(source, Buffer.alloc(2 * 1024 * 1024, 7));
+    const staged = await media.stageLocalFile(source, '中文 大文件.mp4');
+    assert.ok(staged.url.startsWith('/api/files/video/'));
+    assert.strictEqual(staged.size, 2 * 1024 * 1024);
+    const disk = media.toDiskPath(staged.url);
+    assert.ok(disk && fs.existsSync(disk));
+    assert.strictEqual(fs.statSync(disk).size, fs.statSync(source).size);
+    fs.rmSync(sourceDir, { recursive: true, force: true });
+  });
+
+  test('大文件暂存任务提供进度并完成', async () => {
+    const sourceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'donghua-stage-progress-'));
+    const source = path.join(sourceDir, 'progress.mp4');
+    fs.writeFileSync(source, Buffer.alloc(8 * 1024 * 1024, 3));
+    const { id } = media.createStageJob(source, 'progress.mp4');
+    let job;
+    for (let i = 0; i < 100; i++) {
+      job = media.getStageJob(id);
+      assert.ok(job.progress >= 0 && job.progress <= 100);
+      if (job.status === 'completed') break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.strictEqual(job.status, 'completed');
+    assert.strictEqual(job.progress, 100);
+    assert.strictEqual(job.loaded, job.total);
+    assert.ok(Number.isFinite(job.bytesPerSecond) && job.bytesPerSecond >= 0);
+    assert.strictEqual(job.etaSeconds, 0);
+    assert.ok(media.toDiskPath(job.url));
+    fs.rmSync(sourceDir, { recursive: true, force: true });
+  });
+
+  test('大文件暂存任务速度与 ETA 始终是安全数值', async () => {
+    const sourceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'donghua-stage-metrics-'));
+    const source = path.join(sourceDir, 'metrics.mp4');
+    fs.writeFileSync(source, Buffer.alloc(12 * 1024 * 1024, 9));
+    const { id } = media.createStageJob(source, 'metrics.mp4');
+    let job;
+    for (let i = 0; i < 150; i++) {
+      job = media.getStageJob(id);
+      assert.ok(Number.isFinite(job.bytesPerSecond) && job.bytesPerSecond >= 0);
+      assert.ok(job.etaSeconds === null || (Number.isFinite(job.etaSeconds) && job.etaSeconds >= 0));
+      if (job.status === 'completed') break;
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    assert.strictEqual(job.status, 'completed');
+    assert.strictEqual(job.loaded, job.total);
+    assert.strictEqual(job.etaSeconds, 0);
+    fs.rmSync(sourceDir, { recursive: true, force: true });
+  });
+
+  test('暂存任务可取消且不会留下完整目标文件', async () => {
+    const sourceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'donghua-stage-cancel-'));
+    const source = path.join(sourceDir, 'cancel.mp4');
+    fs.writeFileSync(source, Buffer.alloc(32 * 1024 * 1024, 5));
+    const { id } = media.createStageJob(source, 'cancel.mp4');
+    media.cancelStageJob(id);
+    let job;
+    for (let i = 0; i < 100; i++) {
+      job = media.getStageJob(id);
+      if (job.status === 'cancelled') break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.strictEqual(job.status, 'cancelled');
+    assert.strictEqual(job.url, null);
+    const persisted = JSON.parse(fs.readFileSync(path.join(store.resolveDataDir(), 'openreel-stage-jobs.json'), 'utf8'));
+    const persistedJob = persisted.find(item => item.id === id);
+    assert.strictEqual(persistedJob.status, 'cancelled');
+    fs.rmSync(sourceDir, { recursive: true, force: true });
+  });
+
+  test('暂存任务终态与失败列表基础数据可从持久化文件恢复', () => {
+    const persisted = JSON.parse(fs.readFileSync(path.join(store.resolveDataDir(), 'openreel-stage-jobs.json'), 'utf8'));
+    assert.ok(Array.isArray(persisted) && persisted.length > 0);
+    for (const job of persisted) {
+      assert.ok(job.id);
+      assert.ok(['completed', 'failed', 'cancelled', 'pending', 'running'].includes(job.status));
+      assert.ok(Number.isFinite(job.loaded) && job.loaded >= 0);
+      assert.ok(Number.isFinite(job.total) && job.total >= 0);
+    }
+    const listed = media.listStageJobs();
+    assert.strictEqual(listed.length, persisted.length);
+  });
+
+  test('OpenReel 时间线映射保留轨道、时间、裁剪、速度和音量', () => {
+    const openReel = require('../lib/openreel-desktop');
+    const plan = openReel.buildTimelinePlan({
+      tracks: [{ id: 'v1', type: 'video', clips: [
+        { id: 'c1', type: 'video', src: '/api/files/video/a.mp4', name: 'A', start: 2, duration: 4, sourceStart: 1.5, speed: 2, reversed: true, muted: false, volume: 0.7 },
+        { id: 'c2', type: 'video', src: '/api/files/image/b.png', name: 'B', start: 6, duration: 3, sourceStart: 0, speed: 1, muted: true, volume: 1, transitionIn: { type: 'fade', duration: 0.5 } },
+      ] }],
+    }, [
+      { sourceUrl: '/api/files/video/a.mp4', mediaId: 'media-a' },
+      { sourceUrl: '/api/files/image/b.png', mediaId: 'media-b' },
+    ]);
+    assert.strictEqual(plan.tracks.length, 1);
+    const video = plan.tracks.find(t => t.trackType === 'video').clips[0];
+    assert.strictEqual(video.mediaId, 'media-a');
+    assert.strictEqual(video.startTime, 2);
+    assert.strictEqual(video.duration, 4);
+    assert.strictEqual(video.inPoint, 1.5);
+    assert.strictEqual(video.outPoint, 9.5);
+    assert.strictEqual(video.speed, 2);
+    assert.strictEqual(video.reversed, true);
+    assert.strictEqual(video.volume, 0.7);
+    const second = plan.tracks[0].clips[1];
+    assert.strictEqual(second.volume, 0);
+    assert.strictEqual(plan.transitions.length, 1);
+    assert.deepStrictEqual(plan.transitions[0], {
+      clipAId: 'dh-clip-c1',
+      clipBId: 'dh-clip-c2',
+      transitionType: 'fade',
+      duration: 0.5,
+    });
+    assert.strictEqual(plan.warnings.length, 0);
+  });
+
+  test('OpenReel 时间线映射会跳过不相邻片段的转场', () => {
+    const openReel = require('../lib/openreel-desktop');
+    const plan = openReel.buildTimelinePlan({
+      tracks: [{ id: 'v1', type: 'video', clips: [
+        { id: 'c1', type: 'video', src: 'a', start: 0, duration: 2, speed: 1, volume: 1 },
+        { id: 'c2', type: 'video', src: 'b', start: 4, duration: 2, speed: 1, volume: 1, transitionIn: { type: 'fade', duration: 1 } },
+      ] }],
+    }, [{ sourceUrl: 'a', mediaId: 'ma' }, { sourceUrl: 'b', mediaId: 'mb' }]);
+    assert.strictEqual(plan.transitions.length, 0);
+    assert.ok(plan.warnings.some(w => w.includes('不相邻')));
+  });
 
   // ───────────────────────── FFmpeg 命令构造 ─────────────────────────
   section('FFmpeg 命令构造');

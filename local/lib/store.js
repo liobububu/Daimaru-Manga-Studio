@@ -37,6 +37,12 @@ function appRoot() {
  */
 function resolveDataDir() {
   if (dataDir) return dataDir;
+  if (process.env.DONGHUA_DATA_DIR) {
+    dataDir = path.resolve(process.env.DONGHUA_DATA_DIR);
+    fs.mkdirSync(path.join(dataDir, 'tables'), { recursive: true });
+    fs.mkdirSync(path.join(dataDir, 'media'), { recursive: true });
+    return dataDir;
+  }
   const root = appRoot();
   const portable = path.join(root, 'portable');
 
@@ -78,12 +84,14 @@ async function withLock(table, fn) {
   const prev = writeLocks.get(table) || Promise.resolve();
   let release;
   const next = new Promise(r => { release = r; });
-  writeLocks.set(table, prev.then(() => next));
+  const queued = prev.then(() => next);
+  writeLocks.set(table, queued);
   await prev;
   try {
     return await fn();
   } finally {
     release();
+    if (writeLocks.get(table) === queued) writeLocks.delete(table);
   }
 }
 

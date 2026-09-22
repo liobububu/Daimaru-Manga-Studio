@@ -22,6 +22,7 @@ import {
 } from '@/services/api';
 import type { ApiConfig, ModelCatalog, FunctionModelBinding, ModelCapability } from '@/types/types';
 import { FUNCTION_KEY_LABELS, CAPABILITY_LABELS, FUNCTION_CAPABILITY_MAP } from '@/types/types';
+import { db } from '@/db/client';
 
 const API_TYPES = [
   { value: 'openai_compatible', label: 'OpenAI 兼容' },
@@ -523,7 +524,6 @@ function ApiConfigDialog({
     setTesting(true);
     setTestResult(null);
     try {
-      const { db } = await import('@/db/client');
       const body = config?.id && !form.api_key
         ? { apiConfigId: config.id, dryRun: true }
         : { base_url: form.base_url, api_key: form.api_key, dryRun: true };
@@ -1308,7 +1308,6 @@ export default function ModelConfigPage() {
     setSyncingId(config.id);
     setSyncErrors(prev => ({ ...prev, [config.id]: '' }));
     try {
-      const { db } = await import('@/db/client');
       const { data, error } = await db.functions.invoke('sync-models', {
         body: { apiConfigId: config.id, dryRun: false },
       });
@@ -1394,7 +1393,6 @@ export default function ModelConfigPage() {
     // 清理因能力变更而失效的功能绑定（如：取消文本生成后，自动解除分镜生成绑定）
     const removedBindings = await cleanInvalidBindings(model.id, updated);
     if (removedBindings.length > 0) {
-      const { FUNCTION_KEY_LABELS } = await import('@/types/types');
       const names = removedBindings
         .map(k => FUNCTION_KEY_LABELS[k as keyof typeof FUNCTION_KEY_LABELS] || k)
         .join('、');
@@ -1424,7 +1422,6 @@ export default function ModelConfigPage() {
     // 清理因恢复而可能失效的旧绑定
     const removedBindings = await cleanInvalidBindings(model.id, autoCaps);
     if (removedBindings.length > 0) {
-      const { FUNCTION_KEY_LABELS } = await import('@/types/types');
       const names = removedBindings
         .map(k => FUNCTION_KEY_LABELS[k as keyof typeof FUNCTION_KEY_LABELS] || k)
         .join('、');

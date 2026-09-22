@@ -14,8 +14,9 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 const http = require('node:http');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const MOCK_PORT = 5300;
@@ -33,11 +34,24 @@ function check(name, ok, detail) {
 }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-// 1x1 PNG，mock 拿来当"生成的图片"返回（FFmpeg 能正常解码）
-const PNG_1X1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+/**
+ * 用 FFmpeg 真实生成一张测试图。
+ * 别手写 base64 PNG —— 之前那份是坏的（FFmpeg 报 "IEND without all image"），
+ * 结果测试一直失败，还一度以为渲染功能有问题。
+ */
+function makeTestPng(bin) {
+  const tmp = path.join(os.tmpdir(), `e2e-png-${process.pid}-${Date.now()}.png`);
+  spawnSync(bin, [
+    '-y', '-hide_banner', '-loglevel', 'error',
+    '-f', 'lavfi', '-i', 'color=c=blue:s=64x64:d=1',
+    '-frames:v', '1', tmp,
+  ], { windowsHide: true });
+  if (!fs.existsSync(tmp)) throw new Error('测试图生成失败');
+  return tmp;
+}
 
 /** 起一个符合 OpenAI 协议的假服务 */
-function startMock() {
+function startMock(pngB64) {
   const server = http.createServer((req, res) => {
     let body = '';
     req.on('data', c => { body += c; });
@@ -59,7 +73,7 @@ function startMock() {
         });
       }
       if (req.url.startsWith('/v1/images/generations')) {
-        return send(200, { data: [{ b64_json: PNG_1X1 }] });
+        return send(200, { data: [{ b64_json: pngB64 }] });
       }
       send(404, { error: { message: 'mock 未实现的路径 ' + req.url } });
     });
@@ -76,7 +90,12 @@ async function post(p, payload) {
 async function get(p) { return (await fetch(APP + p)).json(); }
 
 (async () => {
-  const mock = await startMock();
+  const bin0 = findFfmpeg();
+  const haveFfmpeg = bin0 && (bin0 !== 'ffmpeg' ? fs.existsSync(bin0) : true);
+  const pngPath = haveFfmpeg ? makeTestPng(bin0) : null;
+  const pngB64 = pngPath ? fs.readFileSync(pngPath).toString('base64') : '';
+
+  const mock = await startMock(pngB64);
   console.log(`mock OpenAI 服务: ${MOCK}`);
 
   const app = spawn(process.execPath, [path.join(ROOT, 'local', 'server.js')], {
@@ -207,8 +226,6 @@ async function get(p) { return (await fetch(APP + p)).json(); }
     const tl = await post('/api/edit/timeline/get', { id: TL });
     check('时间线上有 1 个片段', tl.data.timeline.tracks[0].clips.length === 1);
 
-    const bin = findFfmpeg();
-    const haveFfmpeg = bin && (bin !== 'ffmpeg' ? fs.existsSync(bin) : true);
     if (!haveFfmpeg) {
       console.log('  · 未找到 FFmpeg，跳过导出这一步');
     } else {
@@ -228,6 +245,43 @@ async function get(p) { return (await fetch(APP + p)).json(); }
         check('成片文件存在且非空', fs.existsSync(outFile) && fs.statSync(outFile).size > 500);
       }
     }
+    console.log('\n7. 损坏素材应提前报错，不能让用户干等超时');
+    // 写一张内容坏的 png（有 PNG 头，但数据不完整）
+    const badRel = 'image/e2e-broken.png';
+    const badDir = path.join(store.resolveDataDir(), 'media', 'image');
+    fs.mkdirSync(badDir, { recursive: true });
+    const badPath = path.join(badDir, 'e2e-broken.png');
+    fs.writeFileSync(badPath, Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.alloc(64, 0x00),
+    ]));
+    const TLB = `tl_bad_${Date.now()}`;
+    await post('/api/edit/timeline/save', {
+      id: TLB, name: '坏素材',
+      timeline: { id: TLB, width: 320, height: 240, fps: 25, tracks: [
+        { id: 'v1', type: 'video', clips: [] },
+        { id: 'a1', type: 'audio', clips: [] },
+      ] },
+    });
+    await post('/api/edit/command', { timelineId: TLB,
+      cmd: { type: 'addClip', clip: { type: 'video', src: '/api/files/image/e2e-broken.png', duration: 3, sourceStart: 0, speed: 1, volume: 1 } } });
+    const rb = await post('/api/edit/render', { timelineId: TLB, name: 'bad' });
+    if (rb.error) {
+      // 同步就报错了（素材校验拦下的）
+      check('损坏素材被提前拦下', /无法解码/.test(rb.error), rb.error);
+    } else {
+      let jobB = null;
+      for (let i = 0; i < 40; i++) {
+        const j = await get(`/api/edit/job?id=${rb.data.jobId}`);
+        jobB = j.data;
+        if (jobB.status === 'done' || jobB.status === 'failed') break;
+        await sleep(500);
+      }
+      check('损坏素材最终报失败（不会永远 running）',
+        jobB && jobB.status === 'failed',
+        jobB && (`status=${jobB.status} error=${jobB.error}`));
+    }
+
   } finally {
     app.kill();
     mock.close();

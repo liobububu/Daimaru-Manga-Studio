@@ -12,13 +12,15 @@ npm run server       # 启动本地服务 http://127.0.0.1:5178
 
 前端热更新另开终端跑 `npm run dev`，并在 `.env` 写 `VITE_API_BASE=http://127.0.0.1:5178`。
 
-提交前：
+提交前至少执行：
 
 ```bash
 npm run typecheck
-npm run lint
-npm run test:local   # 逻辑冒烟 + HTTP 端到端
+npm run test:local   # 核心逻辑 + FFmpeg E2E + 渲染精度 + HTTP/API smoke
+npm run build
 ```
+
+准备正式发布或打包 exe 时，再执行 `npm run build:exe`。`npm run lint` 可用于代码风格检查，但不要用自动格式化覆盖工作区里尚未确认归属的改动。
 
 ## 分支与提交
 
@@ -39,6 +41,22 @@ npm run test:local   # 逻辑冒烟 + HTTP 端到端
 - 新接口加在 `local/routes/` 下，再到 `local/server.js` 的路由表注册。
 - 写操作（POST/PUT/DELETE）已统一校验 `Origin`，别绕过。
 - 响应统一走 `sendJson`，它对 JSON 接口带了 `no-store`（状态类接口被浏览器启发式缓存时，症状是「数据已更新但界面还是旧的」）。
+
+### 跨端规则放 `shared/`
+
+前端（ESM）和服务端（CommonJS）需要同一套规则时，放 `shared/` 下，两边都从那里读。
+
+现有的例子是模型能力判断（`shared/capability-rules.js` + `capabilities.js`）：
+前端拿它决定按钮亮不亮，服务端同步模型时拿它写 `capabilities` 字段。
+**两边不一致的后果不是报错，而是功能静默失效**——前端显示能用、存进去却是别的能力，
+按钮灰着或者点了没反应。这类「同一套规则写两遍」的坑踩过一次就够了。
+
+注意两点：
+
+- `shared/` 下有独立的 `package.json` 声明 `"type": "commonjs"`——
+  根 package.json 是 ESM，不声明的话服务端 `require` 不了。
+- 规则文件是 **`.js` 不是 `.json`**：服务端要打进单文件 exe，
+  打包脚本只认 JS 模块，`require` 一个 `.json` 在打包后取不到。
 
 ### OpenAI 兼容规则只有一份实现
 
@@ -66,6 +84,8 @@ npm run build && npm run build:exe
 ```
 
 产物 `dist-exe/动画大丸家.exe`。打包脚本会自动做一次冒烟自检（真启动 exe 请求 health 与首页）。
+
+发布前同步检查 `README.md` 与 `CHANGELOG.md`，确保只写已经完成并验证的能力；进行中的功能放到「已知未完成项」，不要把规划写成现状。
 
 关于打包的已知约束见 `build/build-exe.mjs` 顶部注释，其中几条是踩过的坑（SEA 里 `require` 不解析相对路径、sentinel fuse 要从二进制挖、postject 要用 Node API）。
 

@@ -1,19 +1,30 @@
+import CAP_RULES_JSON from '../../shared/capability-rules.js';
 import { db } from '@/db/client';
-import type { Project, Topic, Script, ScriptVersion, Storyboard, Asset, AssetType, ApiConfig, ModelCatalog, ModelCapability, FunctionModelBinding, PromptTemplate, VideoTask, ComicDraft, AppSetting, VoiceProfile, AudioGenerationRecord } from '@/types/types';
+import { FUNCTION_CAPABILITY_MAP, type Project, type Topic, type Script, type ScriptVersion, type Storyboard, type Asset, type AssetType, type ApiConfig, type ModelCatalog, type ModelCapability, type FunctionModelBinding, type PromptTemplate, type VideoTask, type ComicDraft, type AppSetting, type VoiceProfile, type AudioGenerationRecord } from '@/types/types';
 
 // ===================== 工具函数 =====================
+// 能力判断的规则只有一份（shared/capability-rules.json），
+// 服务端同步模型时读的是同一份文件。别在这里另写一套正则——
+// 两边规则不一致时，同一模型前端显示能生成视频、服务端却存成文本模型，
+// 功能会静默失效（按钮灰着或点了没反应，不报错）。
+const CAP_RULES = (CAP_RULES_JSON as {
+  rules: { p: string; caps: ModelCapability[] }[];
+  default: ModelCapability[];
+});
+const CAP_MATCHERS = CAP_RULES.rules.map(r => ({ re: new RegExp(r.p), caps: r.caps }));
+
 function detectCapabilities(modelId: string): ModelCapability[] {
   const id = modelId.toLowerCase();
   const caps: ModelCapability[] = [];
-  if (/gpt|claude|llama|qwen|deepseek|ernie|chatglm|baichuan|gemini|mistral/.test(id)) caps.push('text_generation');
-  if (/vision|vl|multimodal|mmx/.test(id)) caps.push('multimodal');
-  if (/dalle|image|flux|sd|stable-diffusion|midjourney|ideogram|kolors/.test(id)) caps.push('image_generation');
-  if (/edit|inpaint|outpaint/.test(id)) caps.push('image_edit');
-  if (/video|kling|runway|pika|seedance|wan|sora|gen-|animate/.test(id)) caps.push('video_generation');
-  // Fish Audio TTS 模型: s2.1-pro-free / s2.1-pro / s2-pro / s1 / voice-design-*
-  if (/tts|voice|audio-gen|^s2|^s1$|voice-design/.test(id)) caps.push('audio_generation');
-  if (/whisper|asr|speech-to-text/.test(id)) caps.push('audio_recognition');
-  return caps.length > 0 ? caps : ['text_generation'];
+  let matched = false;
+  for (const { re, caps: add } of CAP_MATCHERS) {
+    if (!re.test(id)) continue;
+    matched = true;
+    for (const c of add) {
+      if (!caps.includes(c)) caps.push(c);
+    }
+  }
+  return matched ? caps : [...CAP_RULES.default];
 }
 
 // ===================== Projects =====================
@@ -430,7 +441,6 @@ export async function cleanInvalidBindings(
 
   if (!bindings || bindings.length === 0) return [];
 
-  const { FUNCTION_CAPABILITY_MAP } = await import('@/types/types');
   const invalidBindings = bindings.filter((b: { id: string; function_key: string }) => {
     const required = FUNCTION_CAPABILITY_MAP[b.function_key as keyof typeof FUNCTION_CAPABILITY_MAP] || [];
     return !required.some(cap => newCapabilities.includes(cap));
