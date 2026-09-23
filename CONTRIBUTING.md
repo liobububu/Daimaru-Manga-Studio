@@ -79,11 +79,27 @@ npm run build
 
 ## 打包
 
+### ⚠️ 先改版本号，再打包
+
+**每次更新后打包都必须先改版本号**，顺序固定：
+
+1. `package.json` 的 `version` 递增
+2. `CHANGELOG.md` 加对应条目
+3. `README.md` 里「当前代码版本」与「本次更新重点」标题同步
+4. `npm run build` → `npm run build:exe` → 打 zip（文件名带新版本号）
+
+3.0.0 那次就是漏了这步：内容更新了、版本号没动，打出来的包和 Release 还标着 3.0.0，
+**包和版本号对不上**。`build:exe` 结尾会检查 `dist-release/` 里有没有同版本产物并提醒，
+但守卫只是提醒——改不改还是靠人。
+
 ```bash
 npm run build && npm run build:exe
 ```
 
 产物 `dist-exe/动画大丸家.exe`。打包脚本会自动做一次冒烟自检（真启动 exe 请求 health 与首页）。
+
+发布包文件名用 ASCII（`DaimaruMangaStudio-vX.Y.Z-win-x64.zip`）：中文文件名在 zip 里
+依赖系统编码，部分解压工具会解成乱码。
 
 发布前同步检查 `README.md` 与 `CHANGELOG.md`，确保只写已经完成并验证的能力；进行中的功能放到「已知未完成项」，不要把规划写成现状。
 

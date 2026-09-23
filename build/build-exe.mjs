@@ -238,3 +238,19 @@ console.log(`\n${smokeOk ? '✓ 打包完成' : '⚠ 打包完成，但冒烟自
 console.log(`  产物：${exePath}`);
 console.log(`  提示：把 exe 单独拷走也能用；若想让数据跟着目录走，在 exe 旁建一个 portable 文件夹。`);
 console.log(`  注意：剪辑导出需要 FFmpeg，程序会依次查找 ffmpeg-static → 应用目录 resources/ffmpeg/ → 系统 PATH。`);
+
+// ───────────────────── 版本号守卫 ─────────────────────
+// 每次更新后打包都必须先改版本号，否则包和版本号对不上（3.0.0 那次就是）。
+// 这里只提醒、不阻断：同一版本重复打包本身是合法的（比如修完 bug 重打）。
+try {
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+  const relDir = path.join(ROOT, 'dist-release');
+  if (pkg.version && fs.existsSync(relDir)) {
+    const sameVersion = fs.readdirSync(relDir).filter(f => f.includes(`v${pkg.version}-`) && f.endsWith('.zip'));
+    if (sameVersion.length) {
+      console.log(`\n  ⚠ 版本号仍是 ${pkg.version}，dist-release/ 里已有同版本产物：`);
+      console.log(`    ${sameVersion.join(', ')}`);
+      console.log('    如果这次有内容更新，请先改 package.json 的版本号再打包。');
+    }
+  }
+} catch { /* 守卫失败不影响打包 */ }
