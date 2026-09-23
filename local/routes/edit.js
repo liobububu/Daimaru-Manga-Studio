@@ -22,7 +22,7 @@ const MAX_JOBS = 50;
 
 async function listTimelines() {
   const rows = await store.readTable(TABLE);
-  return { data: rows.map(r => ({ id: r.id, name: r.name, project_id: r.project_id, updated_at: r.updated_at })) };
+  return { data: rows.map(r => ({ id: r.id, name: r.name, project_id: r.project_id, script_id: r.script_id, updated_at: r.updated_at })) };
 }
 
 async function getTimeline(body) {
@@ -34,12 +34,13 @@ async function getTimeline(body) {
 }
 
 async function saveTimeline(body) {
-  const { id, name, project_id, timeline } = body || {};
+  const { id, name, project_id, script_id, timeline } = body || {};
   if (!timeline) throw Object.assign(new Error('缺少 timeline'), { status: 400 });
 
   const payload = {
     name: name || timeline.name || '主时间线',
     project_id: project_id || null,
+    script_id: script_id || null,
     timeline,
     updated_at: new Date().toISOString(),
   };

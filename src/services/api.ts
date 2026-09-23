@@ -1,31 +1,9 @@
-import CAP_RULES_JSON from '../../shared/capability-rules.js';
+import { detectCapabilitiesFromModel } from '../../shared/capabilities.js';
+import { episodeNumber, sortEpisodes, nextEpisodeNumber, parseEpisodeOutlines } from '../../shared/episode-flow.js';
 import { db } from '@/db/client';
 import { FUNCTION_CAPABILITY_MAP, type Project, type Topic, type Script, type ScriptVersion, type Storyboard, type Asset, type AssetType, type ApiConfig, type ModelCatalog, type ModelCapability, type FunctionModelBinding, type PromptTemplate, type VideoTask, type ComicDraft, type AppSetting, type VoiceProfile, type AudioGenerationRecord } from '@/types/types';
 
 // ===================== 工具函数 =====================
-// 能力判断的规则只有一份（shared/capability-rules.json），
-// 服务端同步模型时读的是同一份文件。别在这里另写一套正则——
-// 两边规则不一致时，同一模型前端显示能生成视频、服务端却存成文本模型，
-// 功能会静默失效（按钮灰着或点了没反应，不报错）。
-const CAP_RULES = (CAP_RULES_JSON as {
-  rules: { p: string; caps: ModelCapability[] }[];
-  default: ModelCapability[];
-});
-const CAP_MATCHERS = CAP_RULES.rules.map(r => ({ re: new RegExp(r.p), caps: r.caps }));
-
-function detectCapabilities(modelId: string): ModelCapability[] {
-  const id = modelId.toLowerCase();
-  const caps: ModelCapability[] = [];
-  let matched = false;
-  for (const { re, caps: add } of CAP_MATCHERS) {
-    if (!re.test(id)) continue;
-    matched = true;
-    for (const c of add) {
-      if (!caps.includes(c)) caps.push(c);
-    }
-  }
-  return matched ? caps : [...CAP_RULES.default];
-}
 
 // ===================== Projects =====================
 export async function getProjects(search?: string, type?: string): Promise<Project[]> {
@@ -106,16 +84,51 @@ export async function deleteTopic(id: string): Promise<void> {
 }
 
 // ===================== Scripts =====================
+export const scriptEpisodeNumber = episodeNumber;
+export const sortScriptsByEpisodeOrder = sortEpisodes;
+export const nextScriptEpisodeNumber = nextEpisodeNumber;
+export const parseScriptEpisodeOutlines = parseEpisodeOutlines;
+
 export async function getScripts(projectId: string): Promise<Script[]> {
   const { data, error } = await db.from('scripts').select('*').eq('project_id', projectId).order('created_at', { ascending: false }).limit(100);
   if (error) throw error;
-  return Array.isArray(data) ? data : [];
+  return Array.isArray(data) ? sortScriptsByEpisodeOrder(data as Script[]) : [];
 }
 
 export async function createScript(data: Omit<Script, 'id' | 'created_at' | 'updated_at'>): Promise<Script> {
-  const { data: result, error } = await db.from('scripts').insert(data).select().maybeSingle();
+  let payload = data;
+  if (!scriptEpisodeNumber(data as Script)) {
+    const existing = await getScripts(data.project_id);
+    payload = { ...data, episode_number: nextScriptEpisodeNumber(existing) };
+  }
+  const { data: result, error } = await db.from('scripts').insert(payload).select().maybeSingle();
   if (error) throw error;
   return result as Script;
+}
+
+export async function upsertEpisodeOutlines(projectId: string, outlineText: string, defaults: Partial<Script> = {}): Promise<Script[]> {
+  const outlines = parseEpisodeOutlines(outlineText);
+  const existing = await getScripts(projectId);
+  const byEpisode = new Map(existing.map(script => [scriptEpisodeNumber(script), script]));
+  const results: Script[] = [];
+  for (const outline of outlines) {
+    const current = byEpisode.get(outline.episode_number);
+    if (current) {
+      await updateScript(current.id, { episode_outline: outline.episode_outline });
+      results.push({ ...current, episode_outline: outline.episode_outline });
+      continue;
+    }
+    results.push(await createScript({
+      project_id: projectId,
+      title: outline.title,
+      content: '',
+      version: 1,
+      ...defaults,
+      episode_number: outline.episode_number,
+      episode_outline: outline.episode_outline,
+    } as Omit<Script, 'id' | 'created_at' | 'updated_at'>));
+  }
+  return sortScriptsByEpisodeOrder(results);
 }
 
 export async function updateScript(id: string, data: Partial<Script>): Promise<void> {
@@ -183,8 +196,23 @@ export async function getAssets(projectId: string, assetType?: AssetType): Promi
   return Array.isArray(data) ? data : [];
 }
 
+export async function checkLocalMediaFiles(urls: string[]): Promise<Record<string, { exists: boolean; local?: boolean; remote?: boolean; size?: number }>> {
+  const unique = [...new Set(urls.filter(Boolean))];
+  if (!unique.length) return {};
+  const response = await fetch('/api/media/check-files', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ urls: unique }) });
+  if (!response.ok) throw new Error(`本地媒体检查失败 (${response.status})`);
+  const data = await response.json();
+  return data?.results || {};
+}
+
 export async function createAsset(data: Omit<Asset, 'id' | 'created_at' | 'updated_at'>): Promise<Asset> {
   const { data: result, error } = await db.from('assets').insert(data).select().maybeSingle();
+  if (error) throw error;
+  return result as Asset;
+}
+
+export async function upsertAssetById(data: Omit<Asset, 'created_at' | 'updated_at'>): Promise<Asset> {
+  const { data: result, error } = await db.from('assets').upsert(data, { onConflict: 'id' }).select().maybeSingle();
   if (error) throw error;
   return result as Asset;
 }
@@ -375,9 +403,9 @@ export async function updateModelCatalog(id: string, data: Partial<ModelCatalog>
   if (error) throw error;
 }
 
-export async function upsertModels(apiConfigId: string, rawModels: {id: string; owned_by?: string; created?: number; object?: string}[], apiConfig: ApiConfig): Promise<void> {
+export async function upsertModels(apiConfigId: string, rawModels: Array<{ id: string; owned_by?: string; created?: number; object?: string; capabilities?: unknown; modalities?: unknown; input_modalities?: unknown; output_modalities?: unknown; input?: unknown; output?: unknown; input_types?: unknown; output_types?: unknown }>, apiConfig: ApiConfig): Promise<void> {
   for (const m of rawModels) {
-    const autoCaps = detectCapabilities(m.id);
+    const autoCaps = detectCapabilitiesFromModel(m) as ModelCapability[];
 
     // 查询时包含 user_confirmed_capabilities，以判断用户是否手动编辑过
     const existing = await db
@@ -549,6 +577,11 @@ export async function createVideoTask(data: Omit<VideoTask, 'id' | 'created_at' 
 
 export async function updateVideoTask(id: string, data: Partial<VideoTask>): Promise<void> {
   const { error } = await db.from('video_tasks').update({ ...data, updated_at: new Date().toISOString() }).eq('id', id);
+  if (error) throw error;
+}
+
+export async function deleteVideoTask(id: string): Promise<void> {
+  const { error } = await db.from('video_tasks').delete().eq('id', id);
   if (error) throw error;
 }
 

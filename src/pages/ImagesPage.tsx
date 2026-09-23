@@ -2,7 +2,7 @@ import MainLayout from '@/components/layouts/MainLayout';
 import ProjectSelector from '@/components/common/ProjectSelector';
 import ModelSelector from '@/components/common/ModelSelector';
 import AssetPickerDialog from '@/components/common/AssetPickerDialog';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import ImageInputField, { type ImageValue } from '@/components/common/ImageInputField';
 import { Button } from '@/components/ui/button';
@@ -14,18 +14,36 @@ import { Switch } from '@/components/ui/switch';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Progress } from '@/components/ui/progress';
 import { Badge } from '@/components/ui/badge';
-import { Image, Sparkles, Download, Copy, Star, StarOff, Trash2, X, ZoomIn, ZoomOut, Maximize, Video, Plus, LibraryBig } from 'lucide-react';
+import { Image, Sparkles, Download, Copy, Star, StarOff, Trash2, X, ZoomIn, ZoomOut, Maximize, Video, Plus, LibraryBig, RefreshCw, Square } from 'lucide-react';
 import { toast } from 'sonner';
 import { useProject } from '@/contexts/ProjectContext';
 import { db } from '@/db/client';
-import { createAsset, getAssets, deleteAsset, updateAsset, updateStoryboard } from '@/services/api';
+import { createAsset, getAssets, deleteAsset, updateAsset, updateStoryboard, getStoryboards } from '@/services/api';
 import type { Asset, Storyboard } from '@/types/types';
 import { creativeAssetSuggestions, insertCreativeAssetToken, resolveCreativeAssetRefs } from '@/lib/creativeAssetRefs';
 import { ASPECT_RATIO_OPTIONS } from '@/types/types';
+import { mediaWorkKey } from '../../shared/episode-flow.js';
 
 const IMAGE_STYLES = ['写实', '动漫', '水彩', '油画', '扁平插画', '赛博朋克', '国风', '像素'];
 const IMAGE_SIZES = ['512x512', '768x768', '1024x1024', '1024x768', '768x1024', '1280x720'];
+
+type ImageBatchStatus = 'idle' | 'running' | 'paused' | 'completed';
+type ImageBatchItemState = 'pending' | 'running' | 'completed' | 'failed';
+type ImageBatchSnapshot = {
+  projectId: string;
+  scriptId: string;
+  queueIds: string[];
+  status: ImageBatchStatus;
+  items: Record<string, { state: ImageBatchItemState; error?: string }>;
+  params: { modelId: string; apiConfigId: string; negativePrompt: string; size: string; count: number; style: string; mode: string };
+  updatedAt: string;
+};
+
+const IMAGE_BATCH_STORAGE_PREFIX = 'daimaru:image-batch:v1:';
+function imageBatchStorageKey(projectId: string, scriptId: string) { return `${IMAGE_BATCH_STORAGE_PREFIX}${projectId}:${scriptId}`; }
+
 
 const GEN_MODES = [
   { value: 'text2image', label: '文生图' },
@@ -63,6 +81,10 @@ export default function ImagesPage() {
   const [apiConfigId, setApiConfigId] = useState('');
   const [saveToLibrary, setSaveToLibrary] = useState(true);
   const [storyboardBoundAssetId, setStoryboardBoundAssetId] = useState<string | null>(null);
+  const autoAdvanceQueue = true;
+  const [batchSnapshot, setBatchSnapshot] = useState<ImageBatchSnapshot | null>(null);
+  const batchStopRef = useRef(false);
+  const batchRunningRef = useRef(false);
 
   // 生成结果（本次生成的图片 URL）
   const [generatedImages, setGeneratedImages] = useState<Array<{ url: string; assetId?: string }>>([]);
@@ -71,7 +93,28 @@ export default function ImagesPage() {
   const [preview, setPreview] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
 
-  const passedStoryboard = (location.state as { storyboard?: Storyboard })?.storyboard;
+  const routeState = location.state as { storyboard?: Storyboard; storyboardQueue?: string[] } | null;
+  const passedStoryboard = routeState?.storyboard;
+  const storyboardQueue = routeState?.storyboardQueue || [];
+  const mediaContextRef = useRef('');
+  mediaContextRef.current = mediaWorkKey(selectedProjectId || undefined, passedStoryboard?.id, storyboardQueue);
+  const [queuedStoryboards, setQueuedStoryboards] = useState<Storyboard[]>([]);
+  const queueIndex = passedStoryboard ? queuedStoryboards.findIndex(s => s.id === passedStoryboard.id) : -1;
+  const scopedStoryboardIds = queuedStoryboards.length ? queuedStoryboards.map(item => item.id) : passedStoryboard ? [passedStoryboard.id] : undefined;
+  const scopedAssets = scopedStoryboardIds
+    ? assets.filter(asset => !asset.storyboard_id || scopedStoryboardIds.includes(asset.storyboard_id))
+    : assets;
+  const batchDone = batchSnapshot ? Object.values(batchSnapshot.items).filter(item => item.state === 'completed').length : 0;
+  const batchFailed = batchSnapshot ? Object.values(batchSnapshot.items).filter(item => item.state === 'failed').length : 0;
+  const batchTotal = batchSnapshot?.queueIds.length || 0;
+  const batchRunning = batchSnapshot?.status === 'running';
+
+  const persistBatch = useCallback((snapshot: ImageBatchSnapshot | null) => {
+    setBatchSnapshot(snapshot);
+    if (!snapshot) return;
+    localStorage.setItem(imageBatchStorageKey(snapshot.projectId, snapshot.scriptId), JSON.stringify(snapshot));
+  }, []);
+
 
   // 读取 URL 参数预填入（来自素材库 / 分镜）
   useEffect(() => {
@@ -90,6 +133,15 @@ export default function ImagesPage() {
   useEffect(() => {
     if (passedStoryboard?.image_prompt) setPrompt(passedStoryboard.image_prompt);
     setStoryboardBoundAssetId(passedStoryboard?.image_asset_id || null);
+    setGeneratedImages([]);
+    if (passedStoryboard?.image_asset_id) {
+      const requestKey = mediaWorkKey(selectedProjectId || undefined, passedStoryboard.id, storyboardQueue);
+      (async () => {
+        const { data } = await db.from('assets').select('*').eq('id', passedStoryboard.image_asset_id).single();
+        const url = data?.file_url || data?.thumbnail_url || '';
+        if (mediaContextRef.current === requestKey && data && url) setGeneratedImages([{ url, assetId: data.id }]);
+      })();
+    }
   }, [passedStoryboard]);
 
   const loadAssets = useCallback(async () => {
@@ -104,6 +156,131 @@ export default function ImagesPage() {
 
   useEffect(() => { loadAssets(); }, [loadAssets]);
 
+  useEffect(() => {
+    if (!selectedProjectId || !passedStoryboard?.script_id) { setBatchSnapshot(null); return; }
+    const key = imageBatchStorageKey(selectedProjectId, passedStoryboard.script_id);
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) { setBatchSnapshot(null); return; }
+      const restored = JSON.parse(raw) as ImageBatchSnapshot;
+      if (restored.projectId !== selectedProjectId || restored.scriptId !== passedStoryboard.script_id) return;
+      // 页面离开时同步请求无法继续；恢复为暂停态，避免重新进入后静默重复扣费。
+      const items = Object.fromEntries(Object.entries(restored.items).map(([id, item]) => [id, item.state === 'running' ? { ...item, state: 'pending' as const } : item]));
+      const safe = { ...restored, status: restored.status === 'running' ? 'paused' as const : restored.status, items };
+      setBatchSnapshot(safe);
+      localStorage.setItem(key, JSON.stringify(safe));
+    } catch { setBatchSnapshot(null); }
+  }, [selectedProjectId, passedStoryboard?.script_id]);
+
+  useEffect(() => () => { batchStopRef.current = true; }, []);
+
+  useEffect(() => {
+    if (!selectedProjectId || storyboardQueue.length === 0) { setQueuedStoryboards([]); return; }
+    const requestKey = mediaWorkKey(selectedProjectId, passedStoryboard?.id, storyboardQueue);
+    getStoryboards(selectedProjectId).then(items => {
+      if (mediaContextRef.current !== requestKey) return;
+      const byId = new Map(items.map(item => [item.id, item]));
+      const scoped = storyboardQueue.map(id => byId.get(id)).filter((item): item is Storyboard => !!item);
+      const scriptId = passedStoryboard?.script_id;
+      setQueuedStoryboards(scriptId ? scoped.filter(item => item.script_id === scriptId) : scoped);
+    }).catch(() => { if (mediaContextRef.current === requestKey) setQueuedStoryboards([]); });
+  }, [selectedProjectId, storyboardQueue.join('|')]);
+
+  function goToQueuedStoryboard(offset: number) {
+    const target = queuedStoryboards[queueIndex + offset];
+    if (!target) return;
+    navigate('/images', { state: { storyboard: target, storyboardQueue } });
+  }
+
+  async function generateImageForStoryboard(shot: Storyboard, snapshot: ImageBatchSnapshot) {
+    const shotPrompt = String(shot.image_prompt || '').trim();
+    if (!shotPrompt) throw new Error(`第 ${shot.shot_index} 镜缺少图片提示词`);
+    const creativeRefs = resolveCreativeAssetRefs(shotPrompt, assets.filter(asset => !asset.storyboard_id || asset.storyboard_id === shot.id));
+    const creativeImages = creativeRefs.filter(ref => ref.asset.file_url || ref.asset.thumbnail_url).map(ref => ({ url: ref.asset.file_url || ref.asset.thumbnail_url || '', assetId: ref.asset.id }));
+    const body: Record<string, unknown> = {
+      apiConfigId: snapshot.params.apiConfigId, modelId: snapshot.params.modelId, prompt: shotPrompt,
+      negativePrompt: snapshot.params.negativePrompt, size: snapshot.params.size, count: snapshot.params.count,
+      style: snapshot.params.style, mode: snapshot.params.mode,
+    };
+    if (creativeImages.length) {
+      body.referenceImageUrls = creativeImages.map(item => item.url);
+      body.referenceAssetIds = creativeImages.map(item => item.assetId).filter(Boolean);
+    } else if (snapshot.params.mode === 'image2image') {
+      if (!refImage?.url) throw new Error('批量图生图需要当前参考图片');
+      body.referenceImageUrl = refImage.url; body.referenceImageAssetId = refImage.assetId;
+    } else if (snapshot.params.mode === 'multi_reference') {
+      if (!refImages.length) throw new Error('批量多图参考需要至少一张参考图片');
+      body.referenceImages = refImages.map(r => ({ url: r.url, assetId: r.assetId }));
+    }
+    const { data, error } = await db.functions.invoke('ai-generate-image', { body });
+    if (error) { const msg = await error?.context?.text?.(); throw new Error(msg || error.message); }
+    const images = data?.images as string[] || [];
+    if (!images.length) throw new Error('未收到图片数据');
+    let firstAssetId = '';
+    for (const imgUrl of images) {
+      const asset = await createAsset({ project_id: snapshot.projectId, storyboard_id: shot.id, asset_type: 'image', name: `图片_${Date.now()}`, file_url: imgUrl, thumbnail_url: imgUrl, prompt: shotPrompt, source_module: 'image_generation', favorite: false });
+      if (!firstAssetId) firstAssetId = asset.id;
+    }
+    if (!firstAssetId) throw new Error('图片保存失败');
+    await updateStoryboard(shot.id, { image_asset_id: firstAssetId });
+    return firstAssetId;
+  }
+
+  async function runImageBatch(seed: ImageBatchSnapshot, onlyFailed = false) {
+    if (batchRunningRef.current) return;
+    batchRunningRef.current = true; batchStopRef.current = false;
+    let current: ImageBatchSnapshot = { ...seed, status: 'running', items: { ...seed.items }, updatedAt: new Date().toISOString() };
+    persistBatch(current);
+    try {
+      const all = await getStoryboards(seed.projectId);
+      const byId = new Map(all.filter(item => item.script_id === seed.scriptId).map(item => [item.id, item]));
+      for (const id of seed.queueIds) {
+        if (batchStopRef.current) break;
+        const original = current.items[id];
+        if (!original || original.state === 'completed') continue;
+        if (onlyFailed && original.state !== 'failed') continue;
+        const shot = byId.get(id);
+        if (!shot) {
+          current = { ...current, items: { ...current.items, [id]: { state: 'failed', error: '分镜已不存在' } }, updatedAt: new Date().toISOString() }; persistBatch(current); continue;
+        }
+        // 离开后恢复时以数据库绑定为准，已经成功的镜头不重复生成。
+        if (shot.image_asset_id) {
+          current = { ...current, items: { ...current.items, [id]: { state: 'completed' } }, updatedAt: new Date().toISOString() }; persistBatch(current); continue;
+        }
+        current = { ...current, items: { ...current.items, [id]: { state: 'running' } }, updatedAt: new Date().toISOString() }; persistBatch(current);
+        try {
+          await generateImageForStoryboard(shot, current);
+          current = { ...current, items: { ...current.items, [id]: { state: 'completed' } }, updatedAt: new Date().toISOString() };
+        } catch (e) {
+          current = { ...current, items: { ...current.items, [id]: { state: 'failed', error: e instanceof Error ? e.message : '未知错误' } }, updatedAt: new Date().toISOString() };
+        }
+        persistBatch(current);
+      }
+      const stopped = batchStopRef.current;
+      const remaining = Object.values(current.items).some(item => item.state === 'pending' || item.state === 'running');
+      current = { ...current, status: stopped || remaining ? 'paused' : 'completed', updatedAt: new Date().toISOString() };
+      persistBatch(current);
+      await loadAssets();
+      if (stopped) toast.info('已停止后续图片任务；已完成结果已保留');
+      else toast.success(`整集图片队列完成：成功 ${Object.values(current.items).filter(i => i.state === 'completed').length}，失败 ${Object.values(current.items).filter(i => i.state === 'failed').length}`);
+    } finally { batchRunningRef.current = false; }
+  }
+
+  async function handleStartBatch() {
+    if (!selectedProjectId || !passedStoryboard?.script_id) { toast.error('请从具体分集的图片待办队列进入'); return; }
+    if (!modelId || !apiConfigId) { toast.error('请先选择图片生成模型'); return; }
+    const all = await getStoryboards(selectedProjectId);
+    const episode = all.filter(item => item.script_id === passedStoryboard.script_id).sort((a, b) => a.shot_index - b.shot_index);
+    const queue = episode.filter(item => !item.image_asset_id);
+    if (!queue.length) { toast.info('本集没有待生成图片的分镜'); return; }
+    const snapshot: ImageBatchSnapshot = { projectId: selectedProjectId, scriptId: passedStoryboard.script_id, queueIds: queue.map(item => item.id), status: 'idle', items: Object.fromEntries(queue.map(item => [item.id, { state: 'pending' as const }])), params: { modelId, apiConfigId, negativePrompt, size, count: imgCount, style: imgStyle, mode: genMode }, updatedAt: new Date().toISOString() };
+    await runImageBatch(snapshot);
+  }
+
+  function handleStopBatch() { batchStopRef.current = true; }
+  function handleResumeBatch() { if (batchSnapshot) void runImageBatch(batchSnapshot); }
+  function handleRetryFailedBatch() { if (batchSnapshot) void runImageBatch(batchSnapshot, true); }
+
   async function handleGenerate() {
     if (!selectedProjectId) { toast.error('请先选择项目'); return; }
     if (!modelId) { toast.error('请先选择图片生成模型'); return; }
@@ -111,12 +288,13 @@ export default function ImagesPage() {
     if (genMode === 'image2image' && !refImage?.url) { toast.error('图生图模式请先选择或上传参考图片'); return; }
     if (genMode === 'multi_reference' && refImages.length < 1) { toast.error('多图参考模式请至少添加一张参考图片'); return; }
 
-    const creativeRefs = resolveCreativeAssetRefs(prompt, assets);
+    const creativeRefs = resolveCreativeAssetRefs(prompt, scopedAssets);
     const creativeImages: ImageValue[] = creativeRefs
       .filter(ref => ref.asset.file_url || ref.asset.thumbnail_url)
       .map(ref => ({ url: ref.asset.file_url || ref.asset.thumbnail_url || '', assetId: ref.asset.id, name: ref.asset.name }));
     setGenerating(true);
     setGeneratedImages([]);
+    const generationKey = mediaContextRef.current;
     try {
       const body: Record<string, unknown> = {
         apiConfigId,
@@ -170,17 +348,22 @@ export default function ImagesPage() {
         for (const imgUrl of images) generated.push({ url: imgUrl });
       }
 
-      setGeneratedImages(generated);
+      if (mediaContextRef.current === generationKey) setGeneratedImages(generated);
       if (passedStoryboard?.id && generated[0]?.assetId) {
         await updateStoryboard(passedStoryboard.id, { image_asset_id: generated[0].assetId });
-        setStoryboardBoundAssetId(generated[0].assetId);
+        if (mediaContextRef.current === generationKey) setStoryboardBoundAssetId(generated[0].assetId);
         toast.success('首张生成图已绑定到对应分镜');
       }
       toast.success(`成功生成 ${images.length} 张图片`);
+      if (mediaContextRef.current === generationKey && autoAdvanceQueue && queueIndex >= 0 && queueIndex < queuedStoryboards.length - 1) {
+        const next = queuedStoryboards[queueIndex + 1];
+        toast.success(`镜${passedStoryboard?.shot_index}完成，继续镜${next.shot_index}`);
+        navigate('/images', { state: { storyboard: next, storyboardQueue }, replace: true });
+      }
     } catch (e) {
       toast.error(`生成失败: ${e instanceof Error ? e.message : '未知错误'}`);
     } finally {
-      setGenerating(false);
+      if (mediaContextRef.current === generationKey) setGenerating(false);
     }
   }
 
@@ -209,7 +392,13 @@ export default function ImagesPage() {
 
   function handleGoToVideo(_imgUrl: string, assetId?: string) {
     if (assetId) {
-      navigate(`/videos?mode=image_to_video&reference_asset_id=${assetId}&project_id=${selectedProjectId || ''}`);
+      if (passedStoryboard) {
+        navigate(`/videos?mode=image_to_video&reference_asset_id=${assetId}&project_id=${selectedProjectId || ''}`, {
+          state: { storyboard: { ...passedStoryboard, image_asset_id: assetId }, storyboardQueue },
+        });
+      } else {
+        navigate(`/videos?mode=image_to_video&reference_asset_id=${assetId}&project_id=${selectedProjectId || ''}`);
+      }
     } else {
       // 没有 assetId 时先提示
       toast.info('请先将图片保存到素材库，再进入视频生成');
@@ -263,10 +452,17 @@ export default function ImagesPage() {
   return (
     <MainLayout>
       <div className="p-4 md:p-6 space-y-6">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
           <h1 className="text-xl font-bold flex items-center gap-2">
             <Image className="w-5 h-5 text-green-400" />图片生成
           </h1>
+          {queuedStoryboards.length > 0 && queueIndex >= 0 && (
+            <div className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2">
+              <span className="text-xs text-muted-foreground">批量队列 {queueIndex + 1} / {queuedStoryboards.length} · 第 {passedStoryboard?.shot_index} 镜</span>
+              <Button size="sm" variant="ghost" disabled={queueIndex <= 0 || generating} onClick={() => goToQueuedStoryboard(-1)}>上一镜</Button>
+              <Button size="sm" variant="secondary" disabled={queueIndex >= queuedStoryboards.length - 1 || generating} onClick={() => goToQueuedStoryboard(1)}>下一镜</Button>
+            </div>
+          )}
         </div>
 
         {/* 参数面板 */}
@@ -350,6 +546,7 @@ export default function ImagesPage() {
                   multiple
                   assetType="image"
                   projectId={selectedProjectId || undefined}
+                  storyboardIds={queuedStoryboards.length ? queuedStoryboards.map(item => item.id) : passedStoryboard ? [passedStoryboard.id] : undefined}
                   title="选择参考图片（多选）"
                 />
               </div>
@@ -358,9 +555,9 @@ export default function ImagesPage() {
             <div><Label>提示词 *</Label>
               <Textarea className="mt-1" rows={3} value={prompt} onChange={e => setPrompt(e.target.value)}
                 placeholder={passedStoryboard ? `从分镜导入：${passedStoryboard.image_prompt}` : '描述要生成的画面内容，支持中英文...'} />
-              {creativeAssetSuggestions(prompt, assets).length > 0 && (
+              {creativeAssetSuggestions(prompt, scopedAssets).length > 0 && (
                 <div className="flex gap-1 flex-wrap mt-1 rounded border border-border p-1.5">
-                  {creativeAssetSuggestions(prompt, assets).map(asset => (
+                  {creativeAssetSuggestions(prompt, scopedAssets).map(asset => (
                     <button key={asset.id} type="button" className="text-xs px-2 py-1 rounded bg-muted hover:bg-accent"
                       onClick={() => setPrompt(value => insertCreativeAssetToken(value, asset.name))}>
                       @{asset.name}
@@ -368,9 +565,9 @@ export default function ImagesPage() {
                   ))}
                 </div>
               )}
-              {resolveCreativeAssetRefs(prompt, assets).length > 0 && (
+              {resolveCreativeAssetRefs(prompt, scopedAssets).length > 0 && (
                 <div className="flex gap-1 flex-wrap mt-1">
-                  {resolveCreativeAssetRefs(prompt, assets).map(ref => <Badge key={ref.asset.id} variant="secondary">@{ref.asset.name} · {ref.category === 'character' ? '角色' : ref.category === 'scene' ? '场景' : '道具'}</Badge>)}
+                  {resolveCreativeAssetRefs(prompt, scopedAssets).map(ref => <Badge key={ref.asset.id} variant="secondary">@{ref.asset.name} · {ref.category === 'character' ? '角色' : ref.category === 'scene' ? '场景' : '道具'}</Badge>)}
                 </div>
               )}
             </div>
@@ -383,12 +580,37 @@ export default function ImagesPage() {
                 <Switch checked={saveToLibrary} onCheckedChange={setSaveToLibrary} id="save-lib" />
                 <Label htmlFor="save-lib">自动保存到素材库</Label>
               </div>
-              <Button onClick={handleGenerate} disabled={generating}>
-                <Sparkles className="w-4 h-4 mr-2" />{generating ? '生成中…' : '生成图片'}
+              <div className="flex items-center gap-2 mr-auto">
+                <Button variant="outline" onClick={handleStartBatch} disabled={generating || batchRunning || !passedStoryboard?.script_id}>
+                  <Sparkles className="w-4 h-4 mr-2" />一键生成本集待办
+                </Button>
+                {batchRunning && <Button variant="outline" onClick={handleStopBatch}><Square className="w-3.5 h-3.5 mr-1.5" />停止后续</Button>}
+                {!batchRunning && batchSnapshot?.status === 'paused' && <Button variant="outline" onClick={handleResumeBatch}>继续队列</Button>}
+                {!batchRunning && batchFailed > 0 && <Button variant="outline" onClick={handleRetryFailedBatch}><RefreshCw className="w-3.5 h-3.5 mr-1.5" />重试失败 {batchFailed}</Button>}
+              </div>
+              <Button onClick={handleGenerate} disabled={generating || batchRunning}>
+                <Sparkles className="w-4 h-4 mr-2" />{generating ? '生成中…' : '生成当前镜'}
               </Button>
             </div>
           </CardContent>
         </Card>
+
+        {/* 本次生成结果 */}
+        {batchSnapshot && batchTotal > 0 && (
+          <Card className="bg-card border-border">
+            <CardContent className="p-4 space-y-2">
+              <div className="flex items-center justify-between gap-3 text-sm">
+                <span>本集图片队列 · {batchSnapshot.status === 'running' ? '生成中' : batchSnapshot.status === 'paused' ? '已暂停，可恢复' : batchSnapshot.status === 'completed' ? '已完成' : '待开始'}</span>
+                <span className="text-muted-foreground">完成 {batchDone}/{batchTotal} · 失败 {batchFailed}</span>
+              </div>
+              <Progress value={batchTotal ? Math.round(batchDone / batchTotal * 100) : 0} className="h-1.5" />
+              {batchFailed > 0 && <div className="space-y-1">{batchSnapshot.queueIds.filter(id => batchSnapshot.items[id]?.state === 'failed').slice(0, 5).map(id => {
+                const shot = queuedStoryboards.find(item => item.id === id);
+                return <p key={id} className="text-xs text-destructive">镜{shot?.shot_index ?? '?'}：{batchSnapshot.items[id]?.error || '生成失败'}</p>;
+              })}</div>}
+            </CardContent>
+          </Card>
+        )}
 
         {/* 本次生成结果 */}
         {generatedImages.length > 0 && (

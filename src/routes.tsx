@@ -11,6 +11,7 @@ import TemplatesPage from './pages/TemplatesPage';
 import SettingsPage from './pages/SettingsPage';
 import AudioProductionPage from './pages/AudioProductionPage';
 import EditorPage from './pages/EditorPage';
+import TaskCenterPage from './pages/TaskCenterPage';
 import type { ReactNode } from 'react';
 
 export interface RouteConfig {
@@ -36,7 +37,10 @@ export const routes: RouteConfig[] = [
   { name: '素材库',     path: '/assets',       element: <AssetsPage /> },
   { name: '条漫编辑器', path: '/comic-editor', element: <ComicEditorPage /> },
   { name: '剪辑台',     path: '/editor',       element: <EditorPage /> },
-  { name: '模型配置',   path: '/model-config', element: <ModelConfigPage /> },
+  { name: '任务中心',   path: '/tasks',        element: <TaskCenterPage /> },
+  { name: '图片模型配置', path: '/model-config/image', element: <ModelConfigPage /> },
+  { name: '视频模型配置', path: '/model-config/video', element: <ModelConfigPage /> },
+  { name: '通用模型配置', path: '/model-config', element: <ModelConfigPage /> },
   { name: '提示词模板', path: '/templates',    element: <TemplatesPage /> },
   { name: '应用设置',   path: '/settings',     element: <SettingsPage /> },
 ];

@@ -2,7 +2,7 @@ import MainLayout from '@/components/layouts/MainLayout';
 import ProjectSelector from '@/components/common/ProjectSelector';
 import ModelSelector from '@/components/common/ModelSelector';
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { useLocation, useSearchParams } from 'react-router-dom';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import MediaInput, { type MediaItem } from '@/components/common/MediaInput';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
@@ -25,10 +25,11 @@ import {
 import { toast } from 'sonner';
 import { db } from '@/db/client';
 import { useProject } from '@/contexts/ProjectContext';
-import { createVideoTask, getVideoTasks, updateVideoTask, createAsset, updateStoryboard, getAssets } from '@/services/api';
+import { createVideoTask, getVideoTasks, updateVideoTask, deleteVideoTask, createAsset, upsertAssetById, updateStoryboard, getAssets, getStoryboards } from '@/services/api';
 import type { VideoTask, Storyboard, ModelCapability, Asset } from '@/types/types';
 import { VIDEO_STATUS_LABELS } from '@/types/types';
 import { creativeAssetRole, creativeAssetSuggestions, insertCreativeAssetToken, resolveCreativeAssetRefs } from '@/lib/creativeAssetRefs';
+import { findExistingVideoTaskAsset, mediaWorkKey, videoTaskBelongsToProject, videoTaskResultAssetId, videoTaskUpdateTarget, videoTaskWritebackContext } from '../../shared/episode-flow.js';
 
 // ── 轮询间隔与超时设置 ─────────────────────────────────────────────────────
 const POLL_INTERVAL_MS = 5000;
@@ -130,6 +131,7 @@ const MODE_GROUPS = VIDEO_MODES.reduce<Record<string, VideoModeConfig[]>>((acc, 
 
 export default function VideosPage() {
   const location = useLocation();
+  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const { selectedProjectId } = useProject();
   const [tasks, setTasks] = useState<VideoTask[]>([]);
@@ -137,6 +139,9 @@ export default function VideosPage() {
   const [submitting, setSubmitting] = useState(false);
   const [previewTask, setPreviewTask] = useState<VideoTask | null>(null);
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollingInFlightRef = useRef(new Set<string>());
+  const taskListProjectRef = useRef('');
+  taskListProjectRef.current = selectedProjectId || '';
 
   // ── 工作台表单状态 ────────────────────────────────────────────────────────
   const [mode, setMode]           = useState('text2video');
@@ -173,15 +178,45 @@ export default function VideosPage() {
   const [apiConfigId, setApiConfigId] = useState('');
   const [saveToLibrary, setSaveToLibrary] = useState(true);
   const [advancedOpen, setAdvancedOpen]   = useState(false);
+  const [autoAdvanceQueue, setAutoAdvanceQueue] = useState(true);
+  const [storyboardVideoAsset, setStoryboardVideoAsset] = useState<Asset | null>(null);
 
-  const passedStoryboard = (location.state as { storyboard?: Storyboard })?.storyboard;
+  const routeState = location.state as { storyboard?: Storyboard; storyboardQueue?: string[] } | null;
+  const passedStoryboard = routeState?.storyboard;
+  const storyboardQueue = routeState?.storyboardQueue || [];
+  const mediaContextRef = useRef('');
+  mediaContextRef.current = mediaWorkKey(selectedProjectId || undefined, passedStoryboard?.id, storyboardQueue);
+  const [queuedStoryboards, setQueuedStoryboards] = useState<Storyboard[]>([]);
+  const queueIndex = passedStoryboard ? queuedStoryboards.findIndex(s => s.id === passedStoryboard.id) : -1;
+  const scopedStoryboardIds = queuedStoryboards.length ? queuedStoryboards.map(item => item.id) : passedStoryboard ? [passedStoryboard.id] : undefined;
+  const scopedProjectImages = scopedStoryboardIds
+    ? projectImages.filter(asset => !asset.storyboard_id || scopedStoryboardIds.includes(asset.storyboard_id))
+    : projectImages;
   const modeConfig = MODE_MAP[mode] || VIDEO_MODES[0];
-  const creativeRefs = resolveCreativeAssetRefs(prompt, projectImages);
+  const creativeRefs = resolveCreativeAssetRefs(prompt, scopedProjectImages);
 
   useEffect(() => {
     if (!selectedProjectId) { setProjectImages([]); return; }
     getAssets(selectedProjectId, 'image').then(setProjectImages).catch(() => setProjectImages([]));
   }, [selectedProjectId]);
+
+  useEffect(() => {
+    if (!selectedProjectId || storyboardQueue.length === 0) { setQueuedStoryboards([]); return; }
+    const requestKey = mediaWorkKey(selectedProjectId, passedStoryboard?.id, storyboardQueue);
+    getStoryboards(selectedProjectId).then(items => {
+      if (mediaContextRef.current !== requestKey) return;
+      const byId = new Map(items.map(item => [item.id, item]));
+      const scoped = storyboardQueue.map(id => byId.get(id)).filter((item): item is Storyboard => !!item);
+      const scriptId = passedStoryboard?.script_id;
+      setQueuedStoryboards(scriptId ? scoped.filter(item => item.script_id === scriptId) : scoped);
+    }).catch(() => { if (mediaContextRef.current === requestKey) setQueuedStoryboards([]); });
+  }, [selectedProjectId, storyboardQueue.join('|')]);
+
+  function goToQueuedStoryboard(offset: number) {
+    const target = queuedStoryboards[queueIndex + offset];
+    if (!target) return;
+    navigate('/videos', { state: { storyboard: target, storyboardQueue } });
+  }
 
   // ── URL 参数预填入 ────────────────────────────────────────────────────────
   useEffect(() => {
@@ -235,11 +270,21 @@ export default function VideosPage() {
   // 分镜预填
   useEffect(() => {
     if (passedStoryboard?.video_prompt) setPrompt(passedStoryboard.video_prompt);
+    setImages([]); setVideos([]); setAudios([]); setStyleRefImages([]);
+    setStoryboardVideoAsset(null);
+    const requestKey = mediaWorkKey(selectedProjectId || undefined, passedStoryboard?.id, storyboardQueue);
+    if (passedStoryboard?.video_asset_id) {
+      (async () => {
+        const { data } = await db.from('assets').select('*').eq('id', passedStoryboard.video_asset_id).single();
+        if (mediaContextRef.current === requestKey && data?.file_url) setStoryboardVideoAsset(data);
+      })();
+    }
     if (passedStoryboard?.image_asset_id) {
       (async () => {
         const { data } = await db.from('assets').select('*').eq('id', passedStoryboard.image_asset_id).single();
         if (data) {
           const item: MediaItem = { id: `sb_${data.id}`, asset_id: data.id, url: data.file_url || data.thumbnail_url || '', name: data.name, role: 'reference', weight: 1 };
+          if (mediaContextRef.current !== requestKey) return;
           setImages([item]);
           setMode('image2video');
         }
@@ -253,18 +298,24 @@ export default function VideosPage() {
     if (preset) { setWidth(preset.width); setHeight(preset.height); }
   }, [ratio]);
 
-  // 切换模式时重置素材
-  useEffect(() => {
+  // 只有用户主动切换模式时才重置素材。程序根据分镜切到图生视频时，
+  // 不能再被 mode effect 把刚回填的分镜主图清掉。
+  function handleModeChange(nextMode: string) {
+    if (nextMode === mode) return;
     setImages([]); setVideos([]); setAudios([]); setStyleRefImages([]);
-  }, [mode]);
+    setMode(nextMode);
+  }
 
   // ── 加载任务 ──────────────────────────────────────────────────────────────
   const loadTasks = useCallback(async () => {
     if (!selectedProjectId) return;
     setLoading(true);
-    try { setTasks(await getVideoTasks(selectedProjectId)); }
-    catch { /* ignore */ }
-    finally { setLoading(false); }
+    const projectId = selectedProjectId;
+    try {
+      const loaded = await getVideoTasks(projectId);
+      if (taskListProjectRef.current === projectId) setTasks(loaded.filter(task => videoTaskBelongsToProject(task, projectId)));
+    } catch { /* ignore */ }
+    finally { if (taskListProjectRef.current === projectId) setLoading(false); }
   }, [selectedProjectId]);
 
   useEffect(() => { loadTasks(); }, [loadTasks]);
@@ -276,11 +327,15 @@ export default function VideosPage() {
       if (pollingRef.current) clearInterval(pollingRef.current);
       pollingRef.current = setInterval(async () => {
         for (const task of active) {
+          const taskId = videoTaskUpdateTarget(task);
+          if (!taskId || pollingInFlightRef.current.has(taskId)) continue;
+          pollingInFlightRef.current.add(taskId);
           try {
             const upstreamTaskId = task.upstream_video_id || task.upstream_task_id;
-            if (!upstreamTaskId || !apiConfigId) continue;
+            const taskApiConfigId = task.api_config_id;
+            if (!upstreamTaskId || !taskApiConfigId) continue;
             const { data } = await db.functions.invoke('check-video-task', {
-              body: { taskId: task.id, upstreamTaskId, apiConfigId },
+              body: { taskId: task.id, upstreamTaskId, apiConfigId: taskApiConfigId },
             });
             if (!data?.status) continue;
             const retryCount = (task.polling_retry_count || 0) + 1;
@@ -295,10 +350,15 @@ export default function VideosPage() {
               updates.video_url = data.videoUrl;
               updates.progress  = 100;
               updates.completed_at = now;
-              if (saveToLibrary && data.videoUrl && selectedProjectId) {
-                const asset = await createAsset({
-                  project_id: selectedProjectId,
-                  storyboard_id: task.storyboard_id,
+              if (saveToLibrary && data.videoUrl) {
+                const writeback = videoTaskWritebackContext(task);
+                if (!writeback.project_id) throw new Error('视频任务缺少原始 project_id，已阻止结果错绑');
+                const projectAssets = await getAssets(writeback.project_id, 'video');
+                let asset = findExistingVideoTaskAsset(task, projectAssets, data.videoUrl);
+                if (!asset) asset = await upsertAssetById({
+                  id: videoTaskResultAssetId(task),
+                  project_id: writeback.project_id,
+                  storyboard_id: writeback.storyboard_id,
                   asset_type: 'video',
                   name: `视频_${Date.now()}`,
                   file_url: data.videoUrl,
@@ -308,7 +368,7 @@ export default function VideosPage() {
                   favorite: false,
                 });
                 if (asset) updates.result_asset_id = asset.id;
-                if (asset && task.storyboard_id) await updateStoryboard(task.storyboard_id, { video_asset_id: asset.id });
+                if (asset && writeback.storyboard_id) await updateStoryboard(writeback.storyboard_id, { video_asset_id: asset.id });
                 toast.success('视频已生成并保存到素材库');
               } else if (data.videoUrl) {
                 toast.success('视频生成完成');
@@ -322,16 +382,17 @@ export default function VideosPage() {
               updates.timeout_at = now;
               toast.warning('视频任务超时，请重新生成');
             }
-            await updateVideoTask(task.id, updates);
-            setTasks(prev => prev.map(t => t.id === task.id ? { ...t, ...updates } : t));
+            await updateVideoTask(taskId, updates);
+            if (videoTaskBelongsToProject(task, selectedProjectId || undefined)) setTasks(prev => prev.map(t => t.id === task.id ? { ...t, ...updates } : t));
           } catch { /* 单个任务失败不影响其他 */ }
+          finally { pollingInFlightRef.current.delete(taskId); }
         }
       }, POLL_INTERVAL_MS);
     } else {
       if (pollingRef.current) { clearInterval(pollingRef.current); pollingRef.current = null; }
     }
     return () => { if (pollingRef.current) clearInterval(pollingRef.current); };
-  }, [tasks, apiConfigId, saveToLibrary, selectedProjectId]);
+  }, [tasks, saveToLibrary, selectedProjectId]);
 
   // ── 提交校验 ──────────────────────────────────────────────────────────────
   function getSubmitError(): string | null {
@@ -353,6 +414,7 @@ export default function VideosPage() {
     const err = getSubmitError();
     if (err) { toast.error(err); return; }
     setSubmitting(true);
+    const submissionKey = mediaContextRef.current;
     try {
       const promptImages: MediaItem[] = creativeRefs
         .filter(ref => ref.asset.file_url || ref.asset.thumbnail_url)
@@ -438,6 +500,7 @@ export default function VideosPage() {
 
       const task = await createVideoTask({
         project_id:          selectedProjectId!,
+        api_config_id:       apiConfigId,
         storyboard_id:       passedStoryboard?.id,
         model_catalog_id:    modelId,
         upstream_task_id:    data?.taskId,
@@ -463,11 +526,16 @@ export default function VideosPage() {
         params_snapshot:     paramsPayload,
       });
 
-      setTasks(prev => [task, ...prev]);
+      if (mediaContextRef.current === submissionKey) setTasks(prev => [task, ...prev]);
       toast.success('视频任务已提交，正在排队生成…');
+      if (mediaContextRef.current === submissionKey && autoAdvanceQueue && queueIndex >= 0 && queueIndex < queuedStoryboards.length - 1) {
+        const next = queuedStoryboards[queueIndex + 1];
+        toast.success(`镜${passedStoryboard?.shot_index}已提交，继续镜${next.shot_index}`);
+        navigate('/videos', { state: { storyboard: next, storyboardQueue }, replace: true });
+      }
     } catch (e) {
       toast.error(`提交失败: ${e instanceof Error ? e.message : '未知错误'}`);
-    } finally { setSubmitting(false); }
+    } finally { if (mediaContextRef.current === submissionKey) setSubmitting(false); }
   }
 
   async function handleRetry(task: VideoTask) {
@@ -478,9 +546,13 @@ export default function VideosPage() {
   }
 
   async function handleDelete(id: string) {
-    await updateVideoTask(id, { status: 'failed' });
-    setTasks(prev => prev.filter(t => t.id !== id));
-    toast.success('已删除');
+    try {
+      await deleteVideoTask(id);
+      setTasks(prev => prev.filter(t => t.id !== id));
+      toast.success('任务记录已删除');
+    } catch (e) {
+      toast.error(`删除失败：${e instanceof Error ? e.message : '未知错误'}`);
+    }
   }
 
   function handleDownload(url: string) {
@@ -504,16 +576,38 @@ export default function VideosPage() {
   return (
     <MainLayout>
       <div className="p-4 md:p-6 space-y-6">
+        {passedStoryboard && storyboardVideoAsset?.file_url && (
+          <Card className="bg-card border-green-500/30">
+            <CardContent className="p-3 flex items-center gap-3">
+              <video src={storyboardVideoAsset.file_url} className="w-28 h-16 rounded object-cover bg-black" muted controls />
+              <div className="min-w-0 flex-1">
+                <div className="text-sm font-medium">第 {passedStoryboard.shot_index} 镜已有成片</div>
+                <div className="text-xs text-muted-foreground truncate">已绑定到当前分镜，可直接预览或重新生成覆盖</div>
+              </div>
+              <Button size="sm" variant="secondary" onClick={() => handleDownload(storyboardVideoAsset.file_url!)}><Download className="w-3 h-3 mr-1" />下载</Button>
+            </CardContent>
+          </Card>
+        )}
+
         {/* 页头 */}
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
           <h1 className="text-xl font-bold flex items-center gap-2">
             <Video className="w-5 h-5 text-red-400" />多模态视频生成工作台
           </h1>
-          {activeTasks.length > 0 && (
-            <div className="flex items-center gap-2 text-sm text-yellow-400">
-              <Loader2 className="w-4 h-4 animate-spin" />{activeTasks.length} 个任务生成中
-            </div>
-          )}
+          <div className="flex items-center gap-2 flex-wrap">
+            {queuedStoryboards.length > 0 && queueIndex >= 0 && (
+              <div className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2">
+                <span className="text-xs text-muted-foreground">批量队列 {queueIndex + 1} / {queuedStoryboards.length} · 第 {passedStoryboard?.shot_index} 镜</span>
+                <Button size="sm" variant="ghost" disabled={queueIndex <= 0 || submitting} onClick={() => goToQueuedStoryboard(-1)}>上一镜</Button>
+                <Button size="sm" variant="secondary" disabled={queueIndex >= queuedStoryboards.length - 1 || submitting} onClick={() => goToQueuedStoryboard(1)}>下一镜</Button>
+              </div>
+            )}
+            {activeTasks.length > 0 && (
+              <div className="flex items-center gap-2 text-sm text-yellow-400">
+                <Loader2 className="w-4 h-4 animate-spin" />{activeTasks.length} 个任务生成中
+              </div>
+            )}
+          </div>
         </div>
 
         {/* ── 工作台主体 ── */}
@@ -552,7 +646,7 @@ export default function VideosPage() {
                     <div className="flex flex-wrap gap-2">
                       {modes.map(m => (
                         <button key={m.value} type="button"
-                          onClick={() => setMode(m.value)}
+                          onClick={() => handleModeChange(m.value)}
                           className={`px-3 py-1.5 rounded-md text-xs font-medium border transition-colors ${
                             mode === m.value
                               ? 'bg-primary text-primary-foreground border-primary'
@@ -577,12 +671,14 @@ export default function VideosPage() {
                       items={images.filter(i => i.role === 'first_frame')}
                       onChange={v => setImages(prev => [...prev.filter(i => i.role !== 'first_frame'), ...v.map(i => ({ ...i, role: 'first_frame' }))])}
                       projectId={selectedProjectId || undefined} required
+                      storyboardIds={queuedStoryboards.length ? queuedStoryboards.map(item => item.id) : passedStoryboard ? [passedStoryboard.id] : undefined}
                     />
                     <MediaInput
                       kind="image" label="尾帧图片 *" single
                       items={images.filter(i => i.role === 'last_frame')}
                       onChange={v => setImages(prev => [...prev.filter(i => i.role !== 'last_frame'), ...v.map(i => ({ ...i, role: 'last_frame' }))])}
                       projectId={selectedProjectId || undefined} required
+                      storyboardIds={queuedStoryboards.length ? queuedStoryboards.map(item => item.id) : passedStoryboard ? [passedStoryboard.id] : undefined}
                     />
                   </div>
                 ) : (
@@ -591,6 +687,7 @@ export default function VideosPage() {
                     label={`图片 *${modeConfig.minImages ? `（至少 ${modeConfig.minImages} 张）` : ''}`}
                     items={images} onChange={setImages}
                     projectId={selectedProjectId || undefined}
+                    storyboardIds={queuedStoryboards.length ? queuedStoryboards.map(item => item.id) : passedStoryboard ? [passedStoryboard.id] : undefined}
                     showRole={mode === 'multi_image' || mode === 'multimodal' || mode === 'char_ref' || mode === 'motion_ref'}
                     required={!!modeConfig.minImages}
                     maxCount={mode === 'image2video' || mode === 'lip_sync' || mode === 'img_audio' ? 1 : undefined}
@@ -606,6 +703,7 @@ export default function VideosPage() {
                 label={`视频 *${modeConfig.minVideos ? `（至少 ${modeConfig.minVideos} 个）` : ''}`}
                 items={videos} onChange={setVideos}
                 projectId={selectedProjectId || undefined}
+                storyboardIds={queuedStoryboards.length ? queuedStoryboards.map(item => item.id) : passedStoryboard ? [passedStoryboard.id] : undefined}
                 showRole={mode === 'multimodal'}
                 required={!!modeConfig.minVideos}
                 single={['video_ref','video2video','video_extend','video_repaint','video_style','vid_audio'].includes(mode)}
@@ -618,6 +716,7 @@ export default function VideosPage() {
                 label={`音频 *${modeConfig.minAudios ? `（至少 ${modeConfig.minAudios} 段）` : ''}`}
                 items={audios} onChange={setAudios}
                 projectId={selectedProjectId || undefined}
+                storyboardIds={queuedStoryboards.length ? queuedStoryboards.map(item => item.id) : passedStoryboard ? [passedStoryboard.id] : undefined}
                 showRole={mode === 'multimodal'}
                 required={!!modeConfig.minAudios}
                 single={['audio_driven','lip_sync','img_audio','vid_audio'].includes(mode)}
@@ -628,7 +727,8 @@ export default function VideosPage() {
             {modeConfig.showStyleRef && (
               <MediaInput kind="image" label="风格参考图（可选）"
                 items={styleRefImages} onChange={setStyleRefImages}
-                projectId={selectedProjectId || undefined} single />
+                projectId={selectedProjectId || undefined}
+                storyboardIds={queuedStoryboards.length ? queuedStoryboards.map(item => item.id) : passedStoryboard ? [passedStoryboard.id] : undefined} single />
             )}
 
             {/* 驱动类型选择 */}
@@ -651,9 +751,9 @@ export default function VideosPage() {
                 <Textarea className="mt-1" rows={3} value={prompt}
                   onChange={e => setPrompt(e.target.value)}
                   placeholder={passedStoryboard ? `分镜提示词：${passedStoryboard.video_prompt}` : '描述视频内容、场景、动作、风格…'} />
-                {creativeAssetSuggestions(prompt, projectImages).length > 0 && (
+                {creativeAssetSuggestions(prompt, scopedProjectImages).length > 0 && (
                   <div className="flex gap-1 flex-wrap mt-1 rounded border border-border p-1.5">
-                    {creativeAssetSuggestions(prompt, projectImages).map(asset => (
+                    {creativeAssetSuggestions(prompt, scopedProjectImages).map(asset => (
                       <button key={asset.id} type="button" className="text-xs px-2 py-1 rounded bg-muted hover:bg-accent"
                         onClick={() => setPrompt(value => insertCreativeAssetToken(value, asset.name))}>
                         @{asset.name}
@@ -742,6 +842,12 @@ export default function VideosPage() {
               <div className="flex items-center gap-2">
                 <Switch checked={saveToLibrary} onCheckedChange={setSaveToLibrary} id="save-vid-lib" />
                 <Label htmlFor="save-vid-lib" className="text-sm">完成后保存到素材库</Label>
+                {queuedStoryboards.length > 1 && (
+                  <>
+                    <Switch checked={autoAdvanceQueue} onCheckedChange={setAutoAdvanceQueue} id="video-auto-advance" />
+                    <Label htmlFor="video-auto-advance" className="text-sm">提交后自动下一镜</Label>
+                  </>
+                )}
               </div>
               <div className="flex items-center gap-3">
                 {submitError && !submitting && (
@@ -834,9 +940,9 @@ export default function VideosPage() {
                             <RefreshCw className="w-3 h-3 mr-1" />重轮询
                           </Button>
                         )}
-                        <Button size="sm" variant="ghost" className="h-7 text-xs text-destructive" onClick={() => handleDelete(t.id)}>
+                        {!isActiveStatus(t.status) && <Button size="sm" variant="ghost" className="h-7 text-xs text-destructive" title="删除任务记录" onClick={() => handleDelete(t.id)}>
                           <Trash2 className="w-3 h-3" />
-                        </Button>
+                        </Button>}
                       </div>
                     </div>
                     {isActiveStatus(t.status) && (

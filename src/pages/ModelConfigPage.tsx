@@ -13,7 +13,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Cpu, Plus, Pencil, Trash2, RefreshCw, CheckCircle, XCircle, Wifi, WifiOff, ChevronDown, ChevronUp, Check, RotateCcw, UserPlus, Wand2 } from 'lucide-react';
+import { Cpu, Plus, Pencil, Trash2, RefreshCw, XCircle, WifiOff, ChevronDown, ChevronUp, Check, RotateCcw, UserPlus, Wand2, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   getApiConfigs, createApiConfig, updateApiConfig, deleteApiConfig,
@@ -23,6 +23,10 @@ import {
 import type { ApiConfig, ModelCatalog, FunctionModelBinding, ModelCapability } from '@/types/types';
 import { FUNCTION_KEY_LABELS, CAPABILITY_LABELS, FUNCTION_CAPABILITY_MAP } from '@/types/types';
 import { db } from '@/db/client';
+import { useLocation } from 'react-router-dom';
+
+const IMAGE_CAPABILITIES = new Set<ModelCapability>(['image_generation', 'image_edit']);
+const VIDEO_CAPABILITIES = new Set<ModelCapability>(FUNCTION_CAPABILITY_MAP.video_generation);
 
 const API_TYPES = [
   { value: 'openai_compatible', label: 'OpenAI 兼容' },
@@ -190,6 +194,7 @@ const TTS_PRESETS: TtsPreset[] = [
 // 规则：base_url 已含版本段（/v1、/v3、/v4）时，下面的路径不再带版本段，避免拼成 /v1/v1。
 interface CompatPreset {
   label: string;
+  scopes: Array<'all' | 'image' | 'video'>;
   provider: string;
   base_url: string;
   models_path: string;
@@ -203,6 +208,7 @@ interface CompatPreset {
 const COMPAT_PRESETS: CompatPreset[] = [
   {
     label: 'OpenAI 官方',
+    scopes: ['all', 'image', 'video'],
     provider: 'OpenAI',
     base_url: 'https://api.openai.com/v1',
     models_path: '/models',
@@ -213,6 +219,7 @@ const COMPAT_PRESETS: CompatPreset[] = [
   },
   {
     label: 'DeepSeek',
+    scopes: ['all'],
     provider: 'DeepSeek',
     base_url: 'https://api.deepseek.com',
     models_path: '/models',
@@ -224,6 +231,7 @@ const COMPAT_PRESETS: CompatPreset[] = [
   },
   {
     label: '月之暗面 Kimi',
+    scopes: ['all'],
     provider: 'Moonshot',
     base_url: 'https://api.moonshot.cn/v1',
     models_path: '/models',
@@ -234,6 +242,7 @@ const COMPAT_PRESETS: CompatPreset[] = [
   },
   {
     label: '智谱 GLM',
+    scopes: ['all'],
     provider: 'Zhipu',
     base_url: 'https://open.bigmodel.cn/api/paas/v4',
     models_path: '/models',
@@ -244,6 +253,7 @@ const COMPAT_PRESETS: CompatPreset[] = [
   },
   {
     label: '硅基流动 SiliconFlow',
+    scopes: ['all', 'image', 'video'],
     provider: 'SiliconFlow',
     base_url: 'https://api.siliconflow.cn/v1',
     models_path: '/models',
@@ -255,6 +265,7 @@ const COMPAT_PRESETS: CompatPreset[] = [
   },
   {
     label: '火山方舟（豆包）',
+    scopes: ['all', 'image', 'video'],
     provider: 'Volcengine',
     base_url: 'https://ark.cn-beijing.volces.com/api/v3',
     models_path: '/models',
@@ -265,6 +276,7 @@ const COMPAT_PRESETS: CompatPreset[] = [
   },
   {
     label: '阿里通义千问（兼容模式）',
+    scopes: ['all', 'image', 'video'],
     provider: 'Alibaba',
     base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     models_path: '/models',
@@ -275,6 +287,7 @@ const COMPAT_PRESETS: CompatPreset[] = [
   },
   {
     label: '腾讯混元',
+    scopes: ['all'],
     provider: 'Tencent',
     base_url: 'https://api.hunyuan.cloud.tencent.com/v1',
     models_path: '/models',
@@ -285,6 +298,7 @@ const COMPAT_PRESETS: CompatPreset[] = [
   },
   {
     label: 'Ollama（本地）',
+    scopes: ['all'],
     provider: 'Ollama',
     base_url: 'http://localhost:11434/v1',
     models_path: '/models',
@@ -296,6 +310,7 @@ const COMPAT_PRESETS: CompatPreset[] = [
   },
   {
     label: 'LM Studio（本地）',
+    scopes: ['all'],
     provider: 'LM Studio',
     base_url: 'http://localhost:1234/v1',
     models_path: '/models',
@@ -307,6 +322,7 @@ const COMPAT_PRESETS: CompatPreset[] = [
   },
   {
     label: 'vLLM（本地）',
+    scopes: ['all'],
     provider: 'vLLM',
     base_url: 'http://localhost:8000/v1',
     models_path: '/models',
@@ -318,6 +334,7 @@ const COMPAT_PRESETS: CompatPreset[] = [
   },
   {
     label: '自定义',
+    scopes: ['all', 'image', 'video'],
     provider: '',
     base_url: '',
     models_path: '/models',
@@ -370,10 +387,11 @@ const MODEL_FETCH_MODES = [
 ];
 
 function ApiConfigDialog({
-  open, onOpenChange, config, onSaved,
+  open, onOpenChange, config, onSaved, scope = 'all',
 }: {
   open: boolean; onOpenChange: (v: boolean) => void;
   config?: ApiConfig; onSaved: () => void;
+  scope?: 'all' | 'image' | 'video';
 }) {
   const [form, setForm] = useState({ name: '', provider: '', base_url: '', api_key: '', api_type: 'openai_compatible' as ApiConfig['api_type'], enabled: true });
   const [vtcOpen, setVtcOpen] = useState(false);
@@ -439,6 +457,7 @@ function ApiConfigDialog({
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<'success' | 'fail' | null>(null);
   const [testDetail, setTestDetail] = useState('');
+  const [showApiKey, setShowApiKey] = useState(false);
 
   useEffect(() => {
     if (config) {
@@ -547,7 +566,8 @@ function ApiConfigDialog({
   }
 
   async function handleSave() {
-    if (!form.name.trim() || !form.base_url.trim()) { toast.error('请填写完整配置信息'); return; }
+    if (!form.name.trim() || !form.base_url.trim()) { toast.error('请填写配置名称和 Base URL'); return; }
+    if (!baseUrlValid) { toast.error('Base URL 格式不正确，请填写以 http:// 或 https:// 开头的地址'); return; }
     if (!config && !form.api_key.trim()) { toast.error('新增配置时必须填写 API Key'); return; }
     setSaving(true);
     try {
@@ -567,6 +587,9 @@ function ApiConfigDialog({
       };
       const payload = {
         ...form,
+        name: form.name.trim(),
+        provider: form.provider.trim(),
+        base_url: normalizedBaseUrl,
         video_task_config,
         model_fetch_mode:         compat.model_fetch_mode,
         models_path:              compat.models_path.trim()             || '/models',
@@ -621,6 +644,17 @@ function ApiConfigDialog({
   }
 
   const isOpenAICompat = form.api_type === 'openai_compatible';
+  const isImageScope = scope === 'image';
+  const isVideoScope = scope === 'video';
+  const isGeneralScope = scope === 'all';
+  const dialogTitle = config ? `编辑${isImageScope ? '图片' : isVideoScope ? '视频' : ''} API 配置` : `新增${isImageScope ? '图片' : isVideoScope ? '视频' : ''} API 配置`;
+  const availableApiTypes = API_TYPES.filter(t => isGeneralScope || t.value !== 'audio_api');
+  const availableCompatPresets = COMPAT_PRESETS.filter(p => p.scopes.includes(scope));
+  const normalizedBaseUrl = form.base_url.trim().replace(/\/+$/, '');
+  const baseUrlValid = !normalizedBaseUrl || /^https?:\/\/[^\s]+$/i.test(normalizedBaseUrl);
+  const hasStoredKey = !!config?.masked_api_key;
+  const canTest = !!normalizedBaseUrl && baseUrlValid && (!!form.api_key.trim() || hasStoredKey) && !testing && !saving;
+  const canSave = !!form.name.trim() && !!normalizedBaseUrl && baseUrlValid && (!!config || !!form.api_key.trim()) && !saving && !testing;
 
   // Chat 请求 URL 预览：与后端 openai-compat.endpointCandidates 的规则保持一致
   const chatUrlPreview = (() => {
@@ -634,9 +668,12 @@ function ApiConfigDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-[calc(100%-2rem)] md:max-w-lg bg-card border-border max-h-[90dvh] overflow-y-auto">
-        <DialogHeader><DialogTitle>{config ? '编辑 API 配置' : '新增 API 配置'}</DialogTitle></DialogHeader>
+      <DialogContent className="max-w-[calc(100%-2rem)] md:max-w-2xl bg-card border-border max-h-[90dvh] overflow-y-auto">
+        <DialogHeader><DialogTitle>{dialogTitle}</DialogTitle></DialogHeader>
         <div className="space-y-3 py-2">
+          <div className="rounded-lg border border-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+            {isImageScope ? '当前为图片 API 配置：只展示模型同步、图片生成路径与图片响应解析参数。' : isVideoScope ? '当前为视频 API 配置：重点展示模型同步与异步视频任务链路参数。' : '当前为通用 API 配置：可配置文本、音频及完整兼容参数。'}
+          </div>
           <div><Label>配置名称 *</Label><Input className="mt-1" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="如：OpenAI 官方" /></div>
           <div>
             <Label>服务商预设（可选）</Label>
@@ -656,7 +693,7 @@ function ApiConfigDialog({
               setPresetNote(p.note ?? '');
             }}>
               <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
-              <SelectContent>{COMPAT_PRESETS.map(p => <SelectItem key={p.label} value={p.label}>{p.label}</SelectItem>)}</SelectContent>
+              <SelectContent>{availableCompatPresets.map(p => <SelectItem key={p.label} value={p.label}>{p.label}</SelectItem>)}</SelectContent>
             </Select>
             {presetNote && <p className="text-xs text-muted-foreground mt-1">{presetNote}</p>}
           </div>
@@ -667,10 +704,15 @@ function ApiConfigDialog({
               if (v === 'audio_api') setAudioOpen(true);
             }}>
               <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
-              <SelectContent>{API_TYPES.map(t => <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>)}</SelectContent>
+              <SelectContent>{availableApiTypes.map(t => <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>)}</SelectContent>
             </Select>
           </div>
-          <div><Label>Base URL *</Label><Input className="mt-1" value={form.base_url} onChange={e => setForm(f => ({ ...f, base_url: e.target.value }))} placeholder="https://api.openai.com/v1" /></div>
+          <div>
+            <Label>Base URL *</Label>
+            <Input className={`mt-1 ${!baseUrlValid ? 'border-destructive' : ''}`} value={form.base_url} onChange={e => { setForm(f => ({ ...f, base_url: e.target.value })); setTestResult(null); }} placeholder="https://api.openai.com/v1" />
+            {!baseUrlValid && <p className="text-xs text-destructive mt-1">请输入完整的 http:// 或 https:// 地址</p>}
+            {baseUrlValid && normalizedBaseUrl && normalizedBaseUrl !== form.base_url.trim() && <p className="text-xs text-muted-foreground mt-1">保存时会自动移除末尾多余的 /</p>}
+          </div>
           <div>
             <Label>API Key {config ? '' : '*'}</Label>
             {config?.masked_api_key && (
@@ -680,10 +722,21 @@ function ApiConfigDialog({
                 <span className="text-muted-foreground/60">（留空不修改）</span>
               </p>
             )}
-            <Input className="mt-1" type="password" value={form.api_key}
-              onChange={e => setForm(f => ({ ...f, api_key: e.target.value }))}
-              placeholder={config ? '输入新密钥以覆盖，留空保持不变' : 'sk-...'}
-              autoComplete="new-password" />
+            <div className="flex gap-2 mt-1">
+              <Input className="flex-1" type={showApiKey ? 'text' : 'password'} value={form.api_key}
+                onChange={e => { setForm(f => ({ ...f, api_key: e.target.value })); setTestResult(null); }}
+                placeholder={config ? '输入新密钥以覆盖，留空保持不变' : 'sk-...'}
+                autoComplete="new-password" />
+              <Button type="button" variant="outline" size="sm" onClick={() => setShowApiKey(v => !v)}>{showApiKey ? '隐藏' : '显示'}</Button>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-border bg-muted/20 p-3 space-y-2">
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <div><p className="text-sm font-medium">连接检查</p><p className="text-xs text-muted-foreground">先测试再保存，可提前发现地址、密钥或模型列表接口问题。</p></div>
+              <Button type="button" variant="outline" size="sm" onClick={handleTest} disabled={!canTest}>{testing ? <><Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />测试中</> : '测试连接'}</Button>
+            </div>
+            {testResult && <div className={`text-xs rounded-md px-2.5 py-2 ${testResult === 'success' ? 'bg-green-500/10 text-green-400' : 'bg-destructive/10 text-destructive'}`}><span className="font-medium">{testResult === 'success' ? '连接成功' : '连接失败'}</span>{testDetail && <span className="ml-2 break-all">{testDetail}</span>}</div>}
           </div>
 
           {/* OpenAI 兼容高级配置（仅 openai_compatible 时显示） */}
@@ -714,15 +767,15 @@ function ApiConfigDialog({
                       placeholder="/models" />
                     <p className="text-xs text-muted-foreground mt-0.5">直接拼接在 Base URL 后</p>
                   </div>
-                  <div>
+                  {isGeneralScope && <div>
                     <Label className="text-xs">Chat Completions 路径</Label>
                     <Input className="mt-1 text-xs h-8 px-2 font-mono" value={compat.chat_completions_path}
                       onChange={e => setCompat(c => ({ ...c, chat_completions_path: e.target.value }))}
                       placeholder="/chat/completions" />
                     <p className="text-xs text-muted-foreground mt-0.5">直接拼接在 Base URL 后</p>
-                  </div>
+                  </div>}
                 </div>
-                {chatUrlPreview && (
+                {isGeneralScope && chatUrlPreview && (
                   <div className="bg-muted/60 rounded-md px-3 py-2 text-xs">
                     <p className="text-muted-foreground font-medium mb-0.5">实际 Chat 请求地址预览</p>
                     <p className="font-mono break-all text-foreground">{chatUrlPreview}</p>
@@ -731,14 +784,14 @@ function ApiConfigDialog({
                     </p>
                   </div>
                 )}
-                <div>
+                {isGeneralScope && <div>
                   <Label className="text-xs">文本响应字段路径</Label>
                   <Input className="mt-1 text-xs h-8 px-2 font-mono" value={compat.text_response_path}
                     onChange={e => setCompat(c => ({ ...c, text_response_path: e.target.value }))}
                     placeholder="choices.0.message.content" />
                   <p className="text-xs text-muted-foreground mt-0.5">点分路径，从响应 JSON 中提取文本内容</p>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
+                </div>}
+                {!isVideoScope && <div className="grid grid-cols-2 gap-2">
                   <div>
                     <Label className="text-xs">图片生成路径</Label>
                     <Input className="mt-1 text-xs h-8 px-2 font-mono" value={compat.images_generations_path}
@@ -753,7 +806,7 @@ function ApiConfigDialog({
                       placeholder="data" />
                     <p className="text-xs text-muted-foreground mt-0.5">取不到时自动按 data / images / output.images 兜底</p>
                   </div>
-                </div>
+                </div>}
                 <div>
                   <Label className="text-xs">请求超时（秒）</Label>
                   <Input className="mt-1 text-xs h-8 px-2 font-mono" type="number" min={1} max={600}
@@ -767,7 +820,7 @@ function ApiConfigDialog({
           )}
 
           {/* 异步视频接口配置（可折叠） */}
-          <Collapsible open={vtcOpen} onOpenChange={setVtcOpen}>
+          {!isImageScope && <Collapsible open={vtcOpen} onOpenChange={setVtcOpen}>
             <CollapsibleTrigger asChild>
               <Button variant="ghost" size="sm" className="w-full justify-between text-muted-foreground px-0 hover:text-foreground">
                 <span className="text-sm font-medium">异步视频接口配置</span>
@@ -872,10 +925,10 @@ function ApiConfigDialog({
                   onChange={e => setVtc(v => ({ ...v, failed_status_values: e.target.value }))} />
               </div>
             </CollapsibleContent>
-          </Collapsible>
+          </Collapsible>}
 
           {/* 音频接口配置（通用 TTS / ASR） */}
-          <Collapsible open={audioOpen} onOpenChange={setAudioOpen}>
+          {isGeneralScope && <Collapsible open={audioOpen} onOpenChange={setAudioOpen}>
             <CollapsibleTrigger asChild>
               <Button variant="ghost" size="sm" className="w-full justify-between text-muted-foreground px-0 hover:text-foreground">
                 <span className="text-sm font-medium flex items-center gap-1.5">
@@ -1135,31 +1188,16 @@ function ApiConfigDialog({
                 </div>
               </div>
             </CollapsibleContent>
-          </Collapsible>
+          </Collapsible>}
 
           <div className="flex items-center gap-2">
             <Switch checked={form.enabled} onCheckedChange={v => setForm(f => ({ ...f, enabled: v }))} id="cfg-enabled" />
             <Label htmlFor="cfg-enabled">启用此配置</Label>
           </div>
-          <Button variant="secondary" size="sm" onClick={handleTest} disabled={testing}>
-            <Wifi className="w-4 h-4 mr-2" />{testing ? '测试中…' : '测试连接'}
-          </Button>
-          {testResult === 'success' && (
-            <div className="flex items-center gap-2 text-green-400 text-sm">
-              <CheckCircle className="w-4 h-4 shrink-0" />
-              <span>{testDetail || '连接成功'}</span>
-            </div>
-          )}
-          {testResult === 'fail' && (
-            <div className="flex items-start gap-2 text-red-400 text-sm">
-              <XCircle className="w-4 h-4 shrink-0 mt-0.5" />
-              <span className="break-words">{testDetail || '连接失败，请检查配置'}</span>
-            </div>
-          )}
         </div>
         <DialogFooter>
           <Button variant="secondary" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button onClick={handleSave} disabled={saving}>{saving ? '保存中…' : '保存'}</Button>
+          <Button onClick={handleSave} disabled={!canSave}>{saving ? '保存中…' : '保存配置'}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -1267,12 +1305,23 @@ function ManualModelDialog({
 }
 
 export default function ModelConfigPage() {
+  const location = useLocation();
+  const modelScope = location.pathname.endsWith('/image') ? 'image' : location.pathname.endsWith('/video') ? 'video' : 'all';
+  const pageTitle = modelScope === 'image' ? '图片模型配置' : modelScope === 'video' ? '视频模型配置' : '通用模型配置';
+  const pageDescription = modelScope === 'image'
+    ? '管理图片生成与图片编辑模型。视频模型不会混在当前列表中。'
+    : modelScope === 'video'
+      ? '管理文生视频、图生视频、首尾帧、多图参考等视频模型。图片模型不会混在当前列表中。'
+      : '管理文本、音频及跨模态 API；图片和视频模型已有独立入口。';
   const [apiConfigs, setApiConfigs] = useState<ApiConfig[]>([]);
   const [models, setModels] = useState<ModelCatalog[]>([]);
   const [bindings, setBindings] = useState<FunctionModelBinding[]>([]);
   const [loading, setLoading] = useState(false);
   const [syncingId, setSyncingId] = useState<string | null>(null);
   const [syncErrors, setSyncErrors] = useState<Record<string, string>>({});
+  const [syncSuccess, setSyncSuccess] = useState<Record<string, { count: number; scopedCount: number; otherCount: number; at: number; diagnostics?: Array<{ id: string; source: string; presentFields: string[]; capabilities: string[] }> }>>({});
+  const [configSearch, setConfigSearch] = useState('');
+  const [configStatus, setConfigStatus] = useState<'all' | 'enabled' | 'disabled' | 'error'>('all');
   const [formOpen, setFormOpen] = useState(false);
   const [editConfig, setEditConfig] = useState<ApiConfig | undefined>();
   const [deleteId, setDeleteId] = useState<string | null>(null);
@@ -1325,7 +1374,8 @@ export default function ModelConfigPage() {
         return;
       }
 
-      const rawModels = data?.models as { id: string; owned_by?: string; capabilities?: string[] }[] || [];
+      const rawModels = data?.models as Array<{ id: string; owned_by?: string; created?: number; object?: string; capabilities?: unknown; modalities?: unknown; input_modalities?: unknown; output_modalities?: unknown; input?: unknown; output?: unknown; input_types?: unknown; output_types?: unknown }> || [];
+      const diagnostics = (data?.diagnostics || []) as Array<{ id: string; source: string; presentFields: string[]; capabilities: string[] }>;
       await upsertModels(config.id, rawModels, config);
 
       if (data?.static) {
@@ -1342,12 +1392,33 @@ export default function ModelConfigPage() {
         return [...others, ...freshModels];
       });
       setExpandedConfigs(prev => new Set([...prev, config.id]));
+      const scopedCount = modelScope === 'all' ? freshModels.length : freshModels.filter(isModelInScope).length;
+      setSyncSuccess(prev => ({
+        ...prev,
+        [config.id]: {
+          count: rawModels.length,
+          scopedCount,
+          otherCount: Math.max(0, freshModels.length - scopedCount),
+          at: Date.now(),
+          diagnostics,
+        },
+      }));
     } catch (e) {
       const msg = e instanceof Error ? e.message : '未知错误';
       setSyncErrors(prev => ({ ...prev, [config.id]: msg }));
       toast.error(`同步失败：${msg}`);
     } finally {
       setSyncingId(null);
+    }
+  }
+
+  async function handleToggleConfig(config: ApiConfig) {
+    try {
+      await updateApiConfig(config.id, { enabled: !config.enabled });
+      setApiConfigs(prev => prev.map(item => item.id === config.id ? { ...item, enabled: !item.enabled } : item));
+      toast.success(config.enabled ? 'API 配置已停用' : 'API 配置已启用');
+    } catch (e) {
+      toast.error(`更新失败：${e instanceof Error ? e.message : '未知错误'}`);
     }
   }
 
@@ -1453,7 +1524,23 @@ export default function ModelConfigPage() {
     toast.success('绑定已更新');
   }
 
-  const modelsByConfig = (configId: string) => models.filter(m => m.api_config_id === configId);
+  const isModelInScope = (model: ModelCatalog) => {
+    if (modelScope === 'image') return model.capabilities.some(cap => IMAGE_CAPABILITIES.has(cap));
+    if (modelScope === 'video') return model.capabilities.some(cap => VIDEO_CAPABILITIES.has(cap));
+    return true;
+  };
+  const modelsByConfig = (configId: string) => models.filter(m => m.api_config_id === configId && isModelInScope(m));
+  const modelCountsByConfig = (configId: string) => {
+    const all = models.filter(m => m.api_config_id === configId);
+    const scoped = all.filter(isModelInScope);
+    return { total: all.length, scoped: scoped.length, other: Math.max(0, all.length - scoped.length) };
+  };
+  const visibleApiConfigs = apiConfigs.filter(cfg => {
+    const keyword = configSearch.trim().toLowerCase();
+    const matchesSearch = !keyword || [cfg.name, cfg.provider, cfg.base_url].some(value => String(value || '').toLowerCase().includes(keyword));
+    const matchesStatus = configStatus === 'all' || (configStatus === 'enabled' && cfg.enabled) || (configStatus === 'disabled' && !cfg.enabled) || (configStatus === 'error' && !!syncErrors[cfg.id]);
+    return matchesSearch && matchesStatus;
+  });
 
   // 内联模型列表组件
   function ModelList({ config }: { config: ApiConfig }) {
@@ -1563,9 +1650,12 @@ export default function ModelConfigPage() {
     <MainLayout>
       <div className="p-4 md:p-6 space-y-6">
         <div className="flex items-center gap-2">
-          <h1 className="text-xl font-bold flex items-center gap-2">
-            <Cpu className="w-5 h-5 text-blue-400" />模型配置
-          </h1>
+          <div>
+            <h1 className="text-xl font-bold flex items-center gap-2">
+              <Cpu className="w-5 h-5 text-blue-400" />{pageTitle}
+            </h1>
+            <p className="text-xs text-muted-foreground mt-1">{pageDescription}</p>
+          </div>
         </div>
 
         <Tabs defaultValue="api" className="space-y-4">
@@ -1576,10 +1666,15 @@ export default function ModelConfigPage() {
 
           {/* API 配置 Tab（含内联模型列表） */}
           <TabsContent value="api" className="space-y-4">
-            <div className="flex justify-end">
-              <Button onClick={() => { setEditConfig(undefined); setFormOpen(true); }}>
-                <Plus className="w-4 h-4 mr-1" />添加配置
-              </Button>
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <div className="flex items-center gap-2 flex-1 min-w-[280px]">
+                <Input className="max-w-sm" value={configSearch} onChange={e => setConfigSearch(e.target.value)} placeholder="搜索配置名称、提供商或 Base URL" />
+                <Select value={configStatus} onValueChange={v => setConfigStatus(v as typeof configStatus)}>
+                  <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
+                  <SelectContent><SelectItem value="all">全部状态</SelectItem><SelectItem value="enabled">已启用</SelectItem><SelectItem value="disabled">已停用</SelectItem><SelectItem value="error">同步异常</SelectItem></SelectContent>
+                </Select>
+              </div>
+              <Button onClick={() => { setEditConfig(undefined); setFormOpen(true); }}><Plus className="w-4 h-4 mr-1" />添加配置</Button>
             </div>
 
             {/* 空状态引导卡 */}
@@ -1600,7 +1695,8 @@ export default function ModelConfigPage() {
                   {[
                     { icon: '🎙️', title: 'TTS 语音合成', desc: '接入 OpenAI、MiniMax、ElevenLabs 等 TTS 服务，为分镜、剧本配音', type: 'audio_api' },
                     { icon: '✍️', title: '文本生成', desc: '接入 GPT-4o、Claude、DeepSeek 等 LLM，生成剧本、分镜脚本、选题', type: 'openai_compatible' },
-                    { icon: '🎨', title: '图片 / 视频生成', desc: '接入图片和视频生成 API，为条漫和短视频批量生成素材', type: 'openai_compatible' },
+                    { icon: '🎨', title: '图片生成', desc: '接入文生图、图生图和图片编辑模型，为分镜和条漫生成素材', type: 'openai_compatible' },
+                    { icon: '🎬', title: '视频生成', desc: '接入文生视频、图生视频、首尾帧和多参考视频模型', type: 'openai_compatible' },
                   ].map(item => (
                     <button key={item.type + item.title}
                       className="text-left rounded-lg border border-border bg-muted/30 hover:bg-muted/60 hover:border-primary/40 transition-colors p-3 space-y-1"
@@ -1645,10 +1741,12 @@ export default function ModelConfigPage() {
               <div className="space-y-3">{[1,2].map(i => <Skeleton key={i} className="h-24" />)}</div>
             ) : apiConfigs.length > 0 && (
               <div className="space-y-3">
-                {apiConfigs.map(cfg => {
+                {visibleApiConfigs.map(cfg => {
                   const isExpanded = expandedConfigs.has(cfg.id);
                   const cfgModelCount = modelsByConfig(cfg.id).length;
+                  const cfgCounts = modelCountsByConfig(cfg.id);
                   const cfgSyncErr = syncErrors[cfg.id];
+                  const cfgSyncOk = syncSuccess[cfg.id];
                   return (
                     <Card key={cfg.id} className="bg-card border-border overflow-hidden">
                       <CardContent className="p-4 pb-3">
@@ -1673,8 +1771,45 @@ export default function ModelConfigPage() {
                             {cfg.masked_api_key && (
                               <p className="text-xs text-muted-foreground mt-0.5 font-mono">{cfg.masked_api_key}</p>
                             )}
+                            <div className="flex items-center gap-2 mt-1.5 text-xs text-muted-foreground flex-wrap">
+                              {modelScope === 'all' ? (
+                                <span>{cfgCounts.total} 个模型</span>
+                              ) : (
+                                <>
+                                  <span className={cfgCounts.scoped > 0 ? 'text-green-400' : ''}>
+                                    {cfgCounts.scoped} 个{modelScope === 'image' ? '图片' : '视频'}模型
+                                  </span>
+                                  {cfgCounts.other > 0 && <span>{cfgCounts.other} 个其他模型已隐藏</span>}
+                                </>
+                              )}
+                              {cfgSyncOk && (
+                                <span className="text-green-400">
+                                  最近同步：共 {cfgSyncOk.count} 个
+                                  {modelScope !== 'all' && `，当前识别 ${cfgSyncOk.scopedCount} 个${modelScope === 'image' ? '图片' : '视频'}模型`}
+                                  {' · '}{new Date(cfgSyncOk.at).toLocaleTimeString()}
+                                </span>
+                              )}
+                              {cfgSyncErr && <span className="text-destructive break-all">{cfgSyncErr}</span>}
+                            </div>
+                            {cfgSyncOk?.diagnostics && cfgSyncOk.diagnostics.length > 0 && (
+                              <div className="mt-2 rounded-md border border-border/70 bg-muted/30 px-2.5 py-2 text-[11px] text-muted-foreground space-y-1">
+                                <div className="font-medium text-foreground/80">同步诊断（显示前 5 个模型）</div>
+                                {cfgSyncOk.diagnostics.slice(0, 5).map(item => (
+                                  <div key={item.id} className="break-all">
+                                    <span className="font-mono text-foreground/80">{item.id}</span>
+                                    {' · 原始字段：'}{item.presentFields.length ? item.presentFields.join(', ') : '无'}
+                                    {' · 来源：'}{item.source === 'capabilities' ? 'API capabilities' : item.source === 'input_output' ? 'API input/output' : item.source === 'modalities' ? 'API modalities' : '模型名称兜底'}
+                                    {' · 结果：'}{item.capabilities.length ? item.capabilities.join(', ') : '无生成能力'}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
                           </div>
                           <div className="flex items-center gap-1 shrink-0 flex-wrap justify-end">
+                            <div className="flex items-center gap-1.5 mr-1">
+                              <Switch checked={cfg.enabled} onCheckedChange={() => handleToggleConfig(cfg)} aria-label={`${cfg.enabled ? '停用' : '启用'} ${cfg.name}`} />
+                              <span className="text-xs text-muted-foreground">{cfg.enabled ? '启用' : '停用'}</span>
+                            </div>
                             <Button size="sm" variant="secondary" onClick={() => handleSync(cfg)} disabled={syncingId === cfg.id}>
                               <RefreshCw className={`w-3 h-3 mr-1 ${syncingId === cfg.id ? 'animate-spin' : ''}`} />同步模型
                             </Button>
@@ -1699,7 +1834,10 @@ export default function ModelConfigPage() {
                             : <ChevronDown className="w-3.5 h-3.5" />}
                           {cfgModelCount > 0
                             ? `${cfgModelCount} 个模型${isExpanded ? '（收起）' : '（查看并编辑）'}`
-                            : cfgSyncErr ? '查看同步错误详情' : '查看模型列表'}
+                            : cfgSyncErr ? '查看同步错误详情'
+                              : cfgCounts.total > 0 && modelScope !== 'all'
+                                ? `已同步 ${cfgCounts.total} 个模型，但未识别到${modelScope === 'image' ? '图片' : '视频'}能力`
+                                : '查看模型列表'}
                         </button>
                       </CardContent>
 
@@ -1712,6 +1850,7 @@ export default function ModelConfigPage() {
                     </Card>
                   );
                 })}
+                {visibleApiConfigs.length === 0 && <div className="rounded-lg border border-dashed border-border p-6 text-center text-sm text-muted-foreground">没有符合当前搜索或状态筛选的 API 配置</div>}
               </div>
             )}
           </TabsContent>
@@ -1771,6 +1910,7 @@ export default function ModelConfigPage() {
         onOpenChange={setFormOpen}
         config={editConfig}
         onSaved={load}
+        scope={modelScope}
       />
 
       {manualModelConfig && (

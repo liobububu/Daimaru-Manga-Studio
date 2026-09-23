@@ -214,6 +214,7 @@ const routes = {
   'POST /api/media/stage-local-file/status': body => mediaRoutes.getStageJob(body?.id),
   'POST /api/media/stage-local-file/cancel': body => mediaRoutes.cancelStageJob(body?.id),
   'GET /api/media/stage-local-file/jobs': () => mediaRoutes.listStageJobs(),
+  'POST /api/media/check-files': body => mediaRoutes.checkFiles(body),
 
   'POST /api/edit/timeline/save': editRoutes.saveTimeline,
   'GET /api/edit/timelines': editRoutes.listTimelines,

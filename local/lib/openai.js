@@ -272,7 +272,8 @@ async function fetchModels(cfg) {
   const list = Array.isArray(data) ? data : Array.isArray(data.data) ? data.data : [];
   return list
     .filter(m => m && typeof m === 'object' && m.id)
-    .map(m => ({ id: String(m.id), owned_by: m.owned_by || null }));
+    // 保留厂商返回的完整模型元数据，供后续能力识别使用。
+    .map(m => ({ ...m, id: String(m.id), owned_by: m.owned_by || null }));
 }
 
 module.exports = {

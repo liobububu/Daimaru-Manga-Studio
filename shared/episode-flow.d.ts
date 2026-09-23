@@ -1,0 +1,18 @@
+export function episodeNumber(script: { episode_number?: number; title?: string }): number | null;
+export function sortEpisodes<T extends { episode_number?: number; title?: string; created_at?: string; id?: string }>(items: T[]): T[];
+export function nextEpisodeNumber(items: Array<{ episode_number?: number; title?: string }>): number;
+export function parseEpisodeOutlines(text: string): Array<{ episode_number: number; episode_outline: string; title: string }>;
+export function firstIncompleteScript<T extends { episode_number?: number; title?: string; content?: string; created_at?: string; id?: string }>(items: T[]): T | null;
+export function videoTaskResultAssetId(task: { id?: string }): string;
+export function videoTaskUpdateTarget(task: { id?: string }): string;
+export function findExistingVideoTaskAsset<T extends { id?: string; project_id?: string; storyboard_id?: string; asset_type?: string; file_url?: string }>(task: { project_id?: string; storyboard_id?: string; result_asset_id?: string }, assets: T[], videoUrl?: string): T | undefined;
+export function videoTaskWritebackContext(task: { project_id?: string; storyboard_id?: string }): { project_id: string; storyboard_id?: string };
+export function videoTaskBelongsToProject(task: { project_id?: string }, projectId?: string): boolean;
+export function mediaWorkKey(projectId?: string, storyboardId?: string, queueIds?: string[]): string;
+export function mediaWorkIsCurrent(requestKey: string, projectId?: string, storyboardId?: string, queueIds?: string[]): boolean;
+export function storyboardLoadKey(projectId?: string, scriptId?: string): string;
+export function storyboardLoadIsCurrent(requestKey: string, projectId?: string, scriptId?: string): boolean;
+export function clipStoryboardBinding(clip: { id?: string; storyboardId?: string; mediaRole?: string }): { storyboardId: string; role: string } | null;
+export function rebindTimelineMedia<T>(timeline: T, storyboards: Array<{ id?: string; video_asset_id?: string; image_asset_id?: string; voiceover_asset_id?: string; dialogue_asset_id?: string }>, assets: Array<{ id?: string; file_url?: string }>): { timeline: T; changed: boolean };
+export function resolveEpisodeStage<TScript, TShot extends { image_asset_id?: string; video_asset_id?: string; voiceover?: string; dialogue?: string; voiceover_asset_id?: string; dialogue_asset_id?: string }>(script: TScript | undefined, shots: TShot[], usable: (id?: string) => boolean): { stage: 'script' | 'storyboard' | 'image' | 'video' | 'audio' | 'complete'; script?: TScript; shot?: TShot };
+export function resolveProjectStage<TScript extends { id?: string; episode_number?: number; title?: string; content?: string; created_at?: string }, TShot extends { image_asset_id?: string; video_asset_id?: string; voiceover?: string; dialogue?: string; voiceover_asset_id?: string; dialogue_asset_id?: string }>(scripts: TScript[], shotsByScript: Record<string, TShot[]> | ((script: TScript) => TShot[]), usable: (id?: string) => boolean): { stage: 'script' | 'storyboard' | 'image' | 'video' | 'audio' | 'complete'; script?: TScript; shot?: TShot };

@@ -44,6 +44,10 @@ export interface Script {
   duration?: string;
   style?: string;
   script_type?: string;
+  /** 分集序号；存在时是跨集流转的最高优先级顺序依据 */
+  episode_number?: number;
+  /** 本集分集大纲；允许先规划本集，再生成正式单集剧本 */
+  episode_outline?: string;
   version: number;
   created_at: string;
   updated_at: string;

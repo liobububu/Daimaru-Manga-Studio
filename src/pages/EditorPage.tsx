@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import MainLayout from '@/components/layouts/MainLayout';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -15,8 +16,10 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { localSupabase } from '@/db/client';
-import { getAssets } from '@/services/api';
-import type { Asset } from '@/types/types';
+import { checkLocalMediaFiles, getAssets, getScripts, getStoryboards } from '@/services/api';
+import type { Asset, Script, Storyboard } from '@/types/types';
+import { useProject } from '@/contexts/ProjectContext';
+import { clipStoryboardBinding, mediaWorkKey, rebindTimelineMedia, sortEpisodes, storyboardLoadKey } from '../../shared/episode-flow.js';
 
 const api = localSupabase.api;
 
@@ -24,6 +27,9 @@ interface Clip {
   id: string;
   type: 'video' | 'audio' | 'image';
   src: string;
+  assetId?: string | null;
+  storyboardId?: string;
+  mediaRole?: 'visual' | 'voiceover' | 'dialogue' | string;
   name?: string;
   start: number;
   duration: number;
@@ -81,10 +87,30 @@ function formatEta(seconds?: number | null) {
 }
 
 export default function EditorPage() {
+  const { selectedProjectId } = useProject();
+  const location = useLocation();
+  const routeState = location.state as { projectId?: string; scriptId?: string } | null;
   const [projects, setProjects] = useState<Array<{ id: string; name: string }>>([]);
   const [projectId, setProjectId] = useState<string>('');
+  const [scripts, setScripts] = useState<Script[]>([]);
+  const [scriptId, setScriptId] = useState<string>('');
+  const [episodeStoryboardIds, setEpisodeStoryboardIds] = useState<Set<string>>(new Set());
+  const [episodeStoryboards, setEpisodeStoryboards] = useState<Storyboard[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
   const [loadingAssets, setLoadingAssets] = useState(false);
+  const [assetsReadyKey, setAssetsReadyKey] = useState('');
+  const [assemblingEpisode, setAssemblingEpisode] = useState(false);
+  const [assemblyMissing, setAssemblyMissing] = useState<string[]>([]);
+  const [invalidTimelineClips, setInvalidTimelineClips] = useState<string[]>([]);
+  const openReelRequestIdRef = useRef<string | null>(null);
+  const assetsLoadKeyRef = useRef('');
+  const scriptsLoadKeyRef = useRef('');
+  const storyboardLoadKeyRef = useRef('');
+  const assemblyKeyRef = useRef('');
+  const editorContextRef = useRef('');
+  const renderContextRef = useRef('');
+  const savedTimelineLoadRef = useRef('');
+  editorContextRef.current = storyboardLoadKey(projectId, scriptId);
 
   const [timeline, setTimeline] = useState<Timeline>(emptyTimeline());
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
@@ -102,31 +128,115 @@ export default function EditorPage() {
         const res = await localSupabase.from('projects').select('*').order('created_at', { ascending: false }).limit(50);
         const list = (res.data || []) as Array<{ id: string; name: string }>;
         setProjects(list);
-        if (list.length > 0) setProjectId(list[0].id);
+        // 剪辑台必须继承全站当前项目，不能每次偷偷切到“最新项目”。
+        const preferredProjectId = routeState?.projectId && list.some(p => p.id === routeState.projectId)
+          ? routeState.projectId
+          : selectedProjectId && list.some(p => p.id === selectedProjectId)
+            ? selectedProjectId
+            : list[0]?.id || '';
+        setProjectId(preferredProjectId);
       } catch {
         /* 项目为空时忽略 */
       }
     })();
-  }, []);
+  }, [selectedProjectId, routeState?.projectId]);
 
   const loadAssets = useCallback(async () => {
-    if (!projectId) { setAssets([]); return; }
+    if (!projectId) { setAssets([]); setAssetsReadyKey(''); return; }
+    const requestKey = mediaWorkKey(projectId, scriptId);
+    assetsLoadKeyRef.current = requestKey;
+    setAssetsReadyKey('');
     setLoadingAssets(true);
     try {
       const data = await getAssets(projectId);
-      setAssets(data.filter(a => a.file_url));
+      if (assetsLoadKeyRef.current === requestKey) { setAssets(data.filter(a => a.file_url)); setAssetsReadyKey(requestKey); }
     } catch (e) {
-      toast.error(`加载素材失败: ${e instanceof Error ? e.message : '未知错误'}`);
+      if (assetsLoadKeyRef.current === requestKey) toast.error(`加载素材失败: ${e instanceof Error ? e.message : '未知错误'}`);
     } finally {
-      setLoadingAssets(false);
+      if (assetsLoadKeyRef.current === requestKey) setLoadingAssets(false);
     }
-  }, [projectId]);
+  }, [projectId, scriptId]);
 
   useEffect(() => { loadAssets(); }, [loadAssets]);
 
+  useEffect(() => {
+    if (!projectId) { scriptsLoadKeyRef.current = ''; setScripts([]); setScriptId(''); return; }
+    const requestKey = `scripts::${projectId}`;
+    scriptsLoadKeyRef.current = requestKey;
+    getScripts(projectId).then(raw => {
+      if (scriptsLoadKeyRef.current !== requestKey) return;
+      const list = sortEpisodes(raw) as Script[];
+      setScripts(list);
+      setScriptId(current => routeState?.scriptId && list.some(item => item.id === routeState.scriptId)
+        ? routeState.scriptId
+        : current && list.some(item => item.id === current)
+          ? current
+          : (list.length === 1 ? list[0].id : ''));
+    }).catch(() => { if (scriptsLoadKeyRef.current === requestKey) { setScripts([]); setScriptId(''); } });
+  }, [projectId]);
+
+  useEffect(() => {
+    // 项目/集数一旦改变，先清空上一集时间线。若当前集有已保存方案，后续加载流程会恢复；
+    // 若没有保存方案，则必须保持空时间线，绝不能把上一集剪辑方案误当成当前集继续编辑。
+    savedTimelineLoadRef.current = '';
+    setTimeline(emptyTimeline());
+    setSelectedClipId(null);
+    setInvalidTimelineClips([]);
+    setRenderStatus('idle');
+    setRenderPercent(0);
+    setRenderError('');
+    setRenderOutput('');
+  }, [projectId, scriptId]);
+
+  useEffect(() => {
+    if (!projectId || !scriptId) { storyboardLoadKeyRef.current = ''; setEpisodeStoryboardIds(new Set()); setEpisodeStoryboards([]); return; }
+    const requestKey = storyboardLoadKey(projectId, scriptId);
+    storyboardLoadKeyRef.current = requestKey;
+    getStoryboards(projectId, scriptId).then(items => {
+      if (storyboardLoadKeyRef.current === requestKey) { setEpisodeStoryboardIds(new Set(items.map(item => item.id))); setEpisodeStoryboards(items); }
+    }).catch(() => { if (storyboardLoadKeyRef.current === requestKey) { setEpisodeStoryboardIds(new Set()); setEpisodeStoryboards([]); } });
+  }, [projectId, scriptId]);
+
+  useEffect(() => {
+    if (!projectId || !scriptId || !episodeStoryboards.length || loadingAssets) return;
+    const contextKey = storyboardLoadKey(projectId, scriptId);
+    if (assetsReadyKey !== mediaWorkKey(projectId, scriptId)) return;
+    if (savedTimelineLoadRef.current === contextKey) return;
+    savedTimelineLoadRef.current = contextKey;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const list = await api.get<{ data: Array<{ id: string; project_id?: string; script_id?: string; updated_at?: string }> }>('/api/edit/timelines');
+        const candidates = (list.data || []).filter(item => item.project_id === projectId).sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
+        let saved: Timeline | null = null;
+        let savedId = '';
+        for (const meta of candidates) {
+          if (meta.script_id && meta.script_id !== scriptId) continue;
+          const loaded = await api.post<{ data: { timeline: Timeline } }>('/api/edit/timeline/get', { id: meta.id });
+          const candidate = loaded.data?.timeline;
+          if (!candidate) continue;
+          if (!meta.script_id) {
+            const bindings = candidate.tracks.flatMap(track => track.clips.map(clipStoryboardBinding)).filter(Boolean) as Array<{ storyboardId: string }>;
+            if (!bindings.length || bindings.some(binding => !episodeStoryboardIds.has(binding.storyboardId))) continue;
+          }
+          saved = candidate; savedId = meta.id; break;
+        }
+        if (!saved || cancelled || editorContextRef.current !== contextKey) return;
+        const rebound = rebindTimelineMedia(saved, episodeStoryboards, assets);
+        setTimeline(rebound.timeline as Timeline);
+        setSelectedClipId(null);
+        if (rebound.changed) {
+          await api.post('/api/edit/timeline/save', { id: savedId || rebound.timeline.id, name: rebound.timeline.name, project_id: projectId, script_id: scriptId, timeline: rebound.timeline });
+          if (!cancelled && editorContextRef.current === contextKey) toast.info('已将剪辑方案中的旧素材重新绑定到当前镜头最新素材');
+        }
+      } catch { /* 没有已保存方案时保持当前空时间线 */ }
+    })();
+    return () => { cancelled = true; };
+  }, [projectId, scriptId, episodeStoryboards, episodeStoryboardIds, assets, loadingAssets, assetsReadyKey]);
+
   const usableAssets = useMemo(
-    () => assets.filter(a => ['video', 'image', 'audio'].includes(a.asset_type)),
-    [assets],
+    () => assets.filter(a => ['video', 'image', 'audio'].includes(a.asset_type) && (!scriptId || !a.storyboard_id || episodeStoryboardIds.has(a.storyboard_id))),
+    [assets, scriptId, episodeStoryboardIds],
   );
 
   const totalDuration = useMemo(() => {
@@ -147,29 +257,30 @@ export default function EditorPage() {
 
   // ── 时间线命令：统一走后端，成功后拿回最新时间线 ──────────
   const runCommand = useCallback(async (cmd: Record<string, unknown>) => {
+    const requestKey = editorContextRef.current;
+    const timelineId = timeline.id;
     try {
-      const res = await api.post<{ data: { timeline: Timeline } }>('/api/edit/command', {
-        timelineId: timeline.id,
-        cmd,
-      });
+      const res = await api.post<{ data: { timeline: Timeline } }>('/api/edit/command', { timelineId, cmd });
+      if (editorContextRef.current !== requestKey) return false;
       if (res.data?.timeline) setTimeline(res.data.timeline);
       return true;
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e));
+      if (editorContextRef.current === requestKey) toast.error(e instanceof Error ? e.message : String(e));
       return false;
     }
   }, [timeline.id]);
 
   /** 先确保时间线已保存（命令路由要求时间线存在） */
   const ensureSaved = useCallback(async () => {
+    const requestKey = editorContextRef.current;
+    const snapshot = timeline;
+    const ownerProjectId = projectId || null;
     const res = await api.post<{ data: { id: string } }>('/api/edit/timeline/save', {
-      id: timeline.id,
-      name: timeline.name,
-      project_id: projectId || null,
-      timeline,
+      id: snapshot.id, name: snapshot.name, project_id: ownerProjectId, script_id: scriptId || null, timeline: snapshot,
     });
-    return res.data?.id || timeline.id;
-  }, [timeline, projectId]);
+    if (editorContextRef.current !== requestKey) return snapshot.id;
+    return res.data?.id || snapshot.id;
+  }, [timeline, projectId, scriptId]);
 
   const addAssetToTimeline = async (asset: Asset) => {
     const type = asset.asset_type === 'audio' ? 'audio' : 'video';
@@ -197,6 +308,91 @@ export default function EditorPage() {
       },
     });
     if (ok) toast.success(`已加入时间线：${asset.name}`);
+  };
+
+  const probeAssetDuration = async (asset: Asset, fallback = 5) => {
+    const assetUrl = asset.file_url || '';
+    if (assetUrl.startsWith('/api/files/')) {
+      try {
+        const probe = await api.post<{ data: { duration: number | null } }>('/api/edit/probe', { url: assetUrl });
+        if (probe.data?.duration) return probe.data.duration;
+      } catch { /* 探测失败使用兜底时长 */ }
+    }
+    return fallback;
+  };
+
+  const assembleEpisodeTimeline = async () => {
+    if (!projectId || assemblingEpisode) return;
+    setAssemblingEpisode(true);
+    setAssemblyMissing([]);
+    const assemblyKey = storyboardLoadKey(projectId, scriptId);
+    assemblyKeyRef.current = assemblyKey;
+    try {
+      if (scripts.length > 1 && !scriptId) {
+        toast.error('该项目包含多个剧本/集数，请先选择要组装的剧本，避免把不同集的分镜混在一起');
+        return;
+      }
+      const [storyboards, projectAssets] = await Promise.all([getStoryboards(projectId, scriptId || undefined), getAssets(projectId)]);
+      if (assemblyKeyRef.current !== assemblyKey) return;
+      const byId = new Map(projectAssets.map(a => [a.id, a]));
+      const localUrls = projectAssets.map(asset => asset.file_url || '').filter(url => url.startsWith('/api/files/'));
+      const localChecks = await checkLocalMediaFiles(localUrls);
+      const assetAvailable = (asset?: Asset) => {
+        if (!asset?.file_url) return false;
+        return !asset.file_url.startsWith('/api/files/') || localChecks[asset.file_url]?.exists === true;
+      };
+      const ordered = [...storyboards].sort((a, b) => a.shot_index - b.shot_index);
+      const missing: string[] = [];
+      const next = emptyTimeline();
+      const selectedScript = scripts.find(item => item.id === scriptId);
+      next.name = selectedScript ? `${selectedScript.title} · 整集自动时间线` : '整集自动时间线';
+      let cursor = 0;
+
+      for (const shot of ordered) {
+        const video = shot.video_asset_id ? byId.get(shot.video_asset_id) : undefined;
+        const image = shot.image_asset_id ? byId.get(shot.image_asset_id) : undefined;
+        const visual = assetAvailable(video) ? video : assetAvailable(image) ? image : undefined;
+        const visualDuration = visual?.asset_type === 'video' ? await probeAssetDuration(visual, 5) : 5;
+
+        // 先计算该镜全部语音的真实长度，再决定镜头槽位长度，避免下一镜压到当前配音上。
+        const audios = [
+          { asset: shot.voiceover_audio || (shot.voiceover_asset_id ? byId.get(shot.voiceover_asset_id) : undefined), label: '旁白', required: !!shot.voiceover?.trim(), duration: 0 },
+          { asset: shot.dialogue_audio || (shot.dialogue_asset_id ? byId.get(shot.dialogue_asset_id) : undefined), label: '对白', required: !!shot.dialogue?.trim(), duration: 0 },
+        ];
+        for (const item of audios) {
+          if (assetAvailable(item.asset)) item.duration = await probeAssetDuration(item.asset!, visualDuration);
+          else if (item.required) missing.push(`镜${shot.shot_index}：${item.asset?.file_url ? `${item.label}音频文件已丢失` : `缺${item.label}音频`}`);
+        }
+        const audioDuration = audios.reduce((sum, item) => sum + item.duration, 0);
+        const shotDuration = Math.max(visualDuration, audioDuration || 0);
+
+        if (visual) {
+          // 静态图可直接延长；视频若短于配音则自动降速铺满该镜，避免黑场/提前切下一镜。
+          const speed = visual.asset_type === 'video' && shotDuration > visualDuration ? visualDuration / shotDuration : 1;
+          next.tracks[0].clips.push({ id: `shot_${shot.id}_visual`, type: 'video', src: visual.file_url!, assetId: visual.id, storyboardId: shot.id, mediaRole: 'visual', name: `镜${shot.shot_index} · ${visual.name}`, start: cursor, duration: shotDuration, sourceStart: 0, speed, reversed: false, muted: false, volume: 1, transitionIn: null });
+          if (!assetAvailable(video)) missing.push(`镜${shot.shot_index}：${video?.file_url ? '视频文件已丢失' : '缺视频'}，已用图片占位`);
+        } else missing.push(`镜${shot.shot_index}：缺视频和图片`);
+
+        let audioOffset = cursor;
+        for (const item of audios) {
+          const audioAsset = item.asset;
+          if (!audioAsset || !assetAvailable(audioAsset) || !audioAsset.file_url || item.duration <= 0) continue;
+          next.tracks[1].clips.push({ id: `shot_${shot.id}_${item.label}`, type: 'audio', src: audioAsset.file_url, assetId: audioAsset.id, storyboardId: shot.id, mediaRole: item.label === '旁白' ? 'voiceover' : 'dialogue', name: `镜${shot.shot_index} · ${item.label}`, start: audioOffset, duration: item.duration, sourceStart: 0, speed: 1, reversed: false, muted: false, volume: 1, transitionIn: null });
+          audioOffset += item.duration;
+        }
+        cursor += shotDuration;
+      }
+
+      if (assemblyKeyRef.current !== assemblyKey) return;
+      setTimeline(next);
+      setSelectedClipId(null);
+      setAssemblyMissing(missing);
+      await api.post('/api/edit/timeline/save', { id: next.id, name: next.name, project_id: projectId, script_id: scriptId || null, timeline: next });
+      if (assemblyKeyRef.current !== assemblyKey) return;
+      toast.success(`整集时间线已组装：${ordered.length} 个分镜${missing.length ? `，${missing.length} 项素材缺失` : ''}`);
+    } catch (e) {
+      toast.error(`整集组装失败：${e instanceof Error ? e.message : '未知错误'}`);
+    } finally { if (assemblyKeyRef.current === assemblyKey) setAssemblingEpisode(false); }
   };
 
   const handleSplit = async () => {
@@ -260,10 +456,37 @@ export default function EditorPage() {
     await runCommand({ type: 'swapClips', clipIdA: selectedClip.id, clipIdB: other.id });
   };
 
+  const validateTimelineMedia = useCallback(async () => {
+    const localClips = timeline.tracks.flatMap(track => track.clips).filter(clip => clip.src?.startsWith('/api/files/'));
+    if (!localClips.length) { setInvalidTimelineClips([]); return []; }
+    const checks = await checkLocalMediaFiles(localClips.map(clip => clip.src));
+    const invalid = localClips.filter(clip => checks[clip.src]?.exists !== true).map(clip => clip.name || clip.id);
+    setInvalidTimelineClips(invalid);
+    return invalid;
+  }, [timeline]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => { validateTimelineMedia().catch(() => undefined); }, 250);
+    return () => window.clearTimeout(timer);
+  }, [validateTimelineMedia]);
+
   // ── 渲染导出 ─────────────────────────────────────────────
   const startRender = async () => {
+    const renderKey = 'render::' + editorContextRef.current + '::' + timeline.id;
+    renderContextRef.current = renderKey;
     if (timeline.tracks.every(t => t.clips.length === 0)) {
       toast.error('时间线是空的');
+      return;
+    }
+    try {
+      const invalid = await validateTimelineMedia();
+      if (renderContextRef.current !== renderKey) return;
+      if (invalid.length) {
+        toast.error(`时间线有 ${invalid.length} 个本地素材文件已丢失，请先重新组装或替换素材`);
+        return;
+      }
+    } catch (e) {
+      toast.error(`导出前素材检查失败：${e instanceof Error ? e.message : '未知错误'}`);
       return;
     }
     setRenderStatus('running');
@@ -276,12 +499,14 @@ export default function EditorPage() {
     }
     try {
       await ensureSaved();
+      if (renderContextRef.current !== renderKey) return;
       const res = await api.post<{ data: { jobId: string } }>('/api/edit/render', {
         timelineId: timeline.id,
         name: timeline.name,
       });
       const jobId = res.data?.jobId;
       if (!jobId) throw new Error('未返回任务 ID');
+      if (renderContextRef.current !== renderKey) return;
 
       pollRef.current = setInterval(async () => {
         try {
@@ -289,6 +514,7 @@ export default function EditorPage() {
             data: { status: string; percent: number; output?: string; error?: string };
           }>(`/api/edit/job?id=${jobId}`);
           const job = j.data;
+          if (renderContextRef.current !== renderKey) return;
           setRenderPercent(job.percent || 0);
           if (job.status === 'done') {
             if (pollRef.current) clearInterval(pollRef.current);
@@ -316,6 +542,18 @@ export default function EditorPage() {
   };
 
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+
+  useEffect(() => {
+    renderContextRef.current = '';
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+    setRenderStatus('idle'); setRenderPercent(0); setRenderError(''); setRenderOutput('');
+  }, [projectId, scriptId]);
+
+  useEffect(() => {
+    renderContextRef.current = '';
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+    setRenderStatus('idle'); setRenderPercent(0); setRenderError(''); setRenderOutput('');
+  }, [projectId, scriptId]);
 
   const assetIcon = (type: string) => {
     if (type === 'video') return <Film className="w-4 h-4" />;
@@ -422,7 +660,18 @@ export default function EditorPage() {
       toast.error('请先选择动画项目');
       return;
     }
+    try {
+      const invalid = await validateTimelineMedia();
+      if (invalid.length) {
+        toast.error(`时间线有 ${invalid.length} 个本地素材文件已丢失，请先重新组装或替换素材`);
+        return;
+      }
+    } catch (e) {
+      toast.error(`导出前素材检查失败：${e instanceof Error ? e.message : '未知错误'}`);
+      return;
+    }
     setSendingToDesktop(true);
+    if (!openReelRequestIdRef.current) openReelRequestIdRef.current = `openreel_${projectId}_${timeline.id}_${Date.now()}`;
     setFailedDesktopAssets([]);
     const controller = new AbortController();
     desktopImportAbortRef.current = controller;
@@ -448,13 +697,18 @@ export default function EditorPage() {
       if (!connected) throw new Error('OpenReel Desktop 已启动，但 MCP 服务尚未就绪，请稍后重试');
 
       const project = projects.find(item => item.id === projectId);
+      const timelineAssetIds = new Set(timeline.tracks.flatMap(track => track.clips.map(clip => clip.assetId).filter((id): id is string => !!id)));
+      const timelineUrls = new Set(timeline.tracks.flatMap(track => track.clips.map(clip => clip.src).filter(Boolean)));
+      const exportAssets = usableAssets.filter(asset => timelineAssetIds.has(asset.id) || (!!asset.file_url && timelineUrls.has(asset.file_url)));
+      const unresolvedClips = timeline.tracks.flatMap(track => track.clips).filter(clip => !exportAssets.some(asset => asset.id === clip.assetId || asset.file_url === clip.src));
+      if (unresolvedClips.length) toast.warning(`当前时间线有 ${unresolvedClips.length} 个片段找不到对应素材，OpenReel 将跳过这些片段`, { duration: 8000 });
       const media = [];
       const localFailures: Array<{ id: string; name: string; error: string }> = [];
-      for (let assetIndex = 0; assetIndex < usableAssets.length; assetIndex++) {
+      for (let assetIndex = 0; assetIndex < exportAssets.length; assetIndex++) {
         if (controller.signal.aborted) throw new DOMException('已取消导入', 'AbortError');
-        const asset = usableAssets[assetIndex];
+        const asset = exportAssets[assetIndex];
         if (!asset.file_url) continue;
-        setDesktopImportProgress({ current: assetIndex + 1, total: usableAssets.length, percent: 0, name: asset.name || asset.id });
+        setDesktopImportProgress({ current: assetIndex + 1, total: exportAssets.length, percent: 0, name: asset.name || asset.id });
         const sourceUrl = asset.file_url;
         let url = asset.file_url;
         // blob: URL 只存在于当前浏览器进程。先把内容落到本地媒体目录，
@@ -503,7 +757,7 @@ export default function EditorPage() {
               const status = await statusRes.json().catch(() => ({}));
               if (!statusRes.ok) throw new Error(status.error || '读取暂存进度失败');
               setDesktopImportProgress({
-                current: assetIndex + 1, total: usableAssets.length, percent: status.progress || 0, name: asset.name || asset.id,
+                current: assetIndex + 1, total: exportAssets.length, percent: status.progress || 0, name: asset.name || asset.id,
                 loaded: status.loaded || 0, bytesTotal: status.total || 0, bytesPerSecond: status.bytesPerSecond || 0, etaSeconds: status.etaSeconds,
               });
               if (status.status === 'completed') { url = status.url; break; }
@@ -528,6 +782,7 @@ export default function EditorPage() {
           frameRate: timeline.fps,
           media,
           timeline,
+          requestId: openReelRequestIdRef.current,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -549,6 +804,7 @@ export default function EditorPage() {
         toast.success(`已创建并保存 OpenReel 工程：导入 ${data.importedCount} 个素材，铺入 ${data.clipCount || 0} 个片段、${data.transitionCount || 0} 个转场`);
       }
       if (Array.isArray(data.warnings) && data.warnings.length) toast.warning(`时间线映射有 ${data.warnings.length} 条提示：${data.warnings.slice(0, 2).join('；')}`, { duration: 8000 });
+      openReelRequestIdRef.current = null;
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') toast.info('已取消本地素材导入');
       else toast.error(error instanceof Error ? error.message : '发送到 OpenReel 失败');
@@ -659,6 +915,11 @@ export default function EditorPage() {
           </div>
         </div>
 
+        {invalidTimelineClips.length > 0 && (
+          <div className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded px-3 py-2">
+            时间线有 {invalidTimelineClips.length} 个本地素材文件已丢失：{invalidTimelineClips.slice(0, 4).join('、')}{invalidTimelineClips.length > 4 ? '…' : ''}。请重新组装整集或替换素材后再导出。
+          </div>
+        )}
         {renderStatus === 'running' && (
           <div className="h-2 w-full bg-muted rounded overflow-hidden">
             <div className="h-full bg-primary transition-all" style={{ width: `${renderPercent}%` }} />
@@ -789,6 +1050,25 @@ export default function EditorPage() {
                   {projects.map(p => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}
                 </SelectContent>
               </Select>
+              {scripts.length > 0 && (
+                <Select value={scriptId || '__all__'} onValueChange={value => setScriptId(value === '__all__' ? '' : value)}>
+                  <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="选择剧本 / 集数" /></SelectTrigger>
+                  <SelectContent>
+                    {scripts.length === 1 ? null : <SelectItem value="__all__">请选择剧本 / 集数</SelectItem>}
+                    {scripts.map(script => <SelectItem key={script.id} value={script.id}>{script.title}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              )}
+              <Button size="sm" className="w-full" onClick={assembleEpisodeTimeline} disabled={!projectId || assemblingEpisode || (scripts.length > 1 && !scriptId)}>
+                {assemblingEpisode ? '正在组装整集…' : '按分镜一键组装整集'}
+              </Button>
+              {assemblyMissing.length > 0 && (
+                <div className="rounded border border-amber-500/30 bg-amber-500/10 p-2 text-[11px] space-y-0.5">
+                  <div className="font-medium">缺失素材 {assemblyMissing.length} 项</div>
+                  {assemblyMissing.slice(0, 8).map((item, index) => <div key={`${item}_${index}`}>{item}</div>)}
+                  {assemblyMissing.length > 8 && <div>还有 {assemblyMissing.length - 8} 项未显示</div>}
+                </div>
+              )}
               {loadingAssets ? (
                 <Skeleton className="h-24 w-full" />
               ) : usableAssets.length === 0 ? (

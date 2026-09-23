@@ -52,8 +52,10 @@ export default function ScriptsPage() {
   const [templateId, setTemplateId] = useState('');
   const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // 从选题页面跳转过来携带的 topic
-  const passedTopic = (location.state as { topic?: Topic })?.topic;
+  // 从上游携带选题，或从“继续创作”恢复到只有分集大纲/未完成正文的单集
+  const routeState = location.state as { topic?: Topic; script?: Script } | null;
+  const passedTopic = routeState?.topic;
+  const passedScript = routeState?.script;
 
   useEffect(() => {
     if (passedTopic) {
@@ -62,6 +64,19 @@ export default function ScriptsPage() {
       setSelectedTopicId(passedTopic.id);
     }
   }, [passedTopic]);
+
+  useEffect(() => {
+    if (!passedScript) return;
+    if (selectedProjectId && passedScript.project_id !== selectedProjectId) {
+      toast.error('传入剧本不属于当前项目，已阻止跨项目续作');
+      return;
+    }
+    setActiveScript(passedScript);
+    setTitle(passedScript.title || '');
+    setContent(passedScript.content || '');
+    setTopicInput(passedScript.episode_outline || '');
+    setSelectedTopicId(passedScript.topic_id || '');
+  }, [passedScript, selectedProjectId]);
 
   const loadScripts = useCallback(async () => {
     if (!selectedProjectId) return;
@@ -103,13 +118,13 @@ export default function ScriptsPage() {
       const selectedTemplate = templates.find(t => t.id === templateId);
       if (selectedTemplate) {
         prompt = buildPromptFromTemplate(selectedTemplate.content, {
-          duration, title, summary: topicInput, style, platform,
+          duration, title, summary: activeScript?.episode_outline || topicInput, style, platform,
         });
       } else {
         prompt = `你是一位专业的短视频编剧。请根据以下信息创作一个${duration}的短视频剧本：
 
 选题/方向：${title || topicInput}
-内容描述：${topicInput}
+内容描述：${activeScript?.episode_outline || topicInput}
 剧本类型：${scriptType}
 叙事风格：${style}
 目标平台：${platform}
@@ -128,7 +143,7 @@ export default function ScriptsPage() {
       // 创建或更新剧本
       let script: Script;
       if (activeScript) {
-        await updateScript(activeScript.id, { content: result, title: title || activeScript.title, version: activeScript.version + 1 });
+        await updateScript(activeScript.id, { content: result, episode_outline: activeScript.episode_outline || topicInput || undefined, title: title || activeScript.title, version: activeScript.version + 1 });
         await saveScriptVersion(activeScript.id, activeScript.version, activeScript.content || '');
         script = { ...activeScript, content: result, version: activeScript.version + 1 };
         setActiveScript(script);
@@ -136,6 +151,7 @@ export default function ScriptsPage() {
         script = await createScript({
           project_id: selectedProjectId,
           topic_id: selectedTopicId || undefined,
+          episode_outline: topicInput || undefined,
           title: title || '未命名剧本',
           content: result,
           duration,
@@ -164,6 +180,8 @@ export default function ScriptsPage() {
       try {
         const script = await createScript({
           project_id: selectedProjectId,
+          topic_id: selectedTopicId || undefined,
+          episode_outline: topicInput || undefined,
           title,
           content,
           duration,

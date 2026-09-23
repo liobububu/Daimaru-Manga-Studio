@@ -342,4 +342,22 @@ function toLoopbackUrl(urlOrPath, origin) {
   return `${base}/api/files/${rel.split(path.sep).map(encodeURIComponent).join('/')}`;
 }
 
-module.exports = { upload, saveGenerated, stageLocalFile, createStageJob, getStageJob, cancelStageJob, listStageJobs, serveFile, toDiskPath, toLoopbackUrl, sanitizeFileName, MEDIA_TYPES, ALLOWED_EXT };
+/** 批量检查本地媒体是否真实存在。远端 URL 不发网络请求，只标记为 remote。 */
+async function checkFiles(body) {
+  const urls = Array.isArray(body?.urls) ? body.urls.slice(0, 500) : [];
+  const results = {};
+  for (const raw of urls) {
+    const value = String(raw || '');
+    if (!value) continue;
+    if (/^https?:\/\//i.test(value)) { results[value] = { exists: true, remote: true }; continue; }
+    const disk = toDiskPath(value);
+    if (!disk) { results[value] = { exists: false, local: true }; continue; }
+    try {
+      const stat = await fsp.stat(disk);
+      results[value] = { exists: stat.isFile(), local: true, size: stat.isFile() ? stat.size : 0 };
+    } catch { results[value] = { exists: false, local: true }; }
+  }
+  return { results };
+}
+
+module.exports = { upload, saveGenerated, stageLocalFile, createStageJob, getStageJob, cancelStageJob, listStageJobs, checkFiles, serveFile, toDiskPath, toLoopbackUrl, sanitizeFileName, MEDIA_TYPES, ALLOWED_EXT };

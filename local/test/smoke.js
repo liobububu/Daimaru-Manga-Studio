@@ -171,10 +171,16 @@ test('swap 拒绝不相邻的片段', () => {
 // 模型能力判断：规则数据在 shared/capability-rules.json，前端与服务端共用。
 // 这条测试守的是服务端这一侧；改规则时前端会跟着变，所以改完要跑一遍全链路确认同步结果。
 test('能力判断按规则累加（共享规则表）', () => {
-  const { detectCapabilities } = require('../../shared/capabilities');
+  const { detectCapabilities, detectCapabilitiesFromModel } = require('../../shared/capabilities');
   assert.deepStrictEqual(detectCapabilities('gpt-4o'), ['text_generation']);
   assert.deepStrictEqual(detectCapabilities('dall-e-3'), ['image_generation']);
   assert.deepStrictEqual(detectCapabilities('kling-v1'), ['video_generation']);
+  assert.ok(detectCapabilities('qwen-image-2.1').includes('image_generation'));
+  assert.ok(detectCapabilities('flux-kontext-pro').includes('image_generation'));
+  assert.ok(detectCapabilities('flux-kontext-pro').includes('image_edit'));
+  assert.ok(detectCapabilities('minimax-h3').includes('video_generation'));
+  assert.ok(detectCapabilities('veo-3.1').includes('video_generation'));
+  assert.ok(detectCapabilities('hunyuan-video').includes('video_generation'));
   assert.ok(detectCapabilities('tts-1').includes('audio_generation'));
   assert.ok(detectCapabilities('whisper-1').includes('audio_recognition'));
   // 多命中的要累加，不能只取第一条
@@ -184,6 +190,53 @@ test('能力判断按规则累加（共享规则表）', () => {
   assert.deepStrictEqual(detectCapabilities('text-embedding-3-large'), []);
   // 认不出的模型退回默认，而不是空
   assert.deepStrictEqual(detectCapabilities('my-custom-model'), ['text_generation']);
+  // API 明确返回能力元数据时必须优先于名称猜测
+  assert.deepStrictEqual(detectCapabilitiesFromModel({ id: 'gpt-looking-name', capabilities: ['video_generation'] }), ['video_generation']);
+  assert.ok(detectCapabilitiesFromModel({ id: 'unknown', modalities: ['text', 'image'] }).includes('image_generation'));
+  assert.ok(detectCapabilitiesFromModel({ id: 'unknown', output_modalities: ['video'] }).includes('video_generation'));
+  const visionInput = detectCapabilitiesFromModel({ id: 'unknown', input_types: { image: true }, output_types: { text: true } });
+  assert.ok(visionInput.includes('text_generation'));
+  assert.ok(visionInput.includes('multimodal'));
+  assert.ok(!visionInput.includes('image_generation'));
+  const imageOutput = detectCapabilitiesFromModel({ id: 'unknown', input_modalities: ['text', 'image'], output_modalities: ['image'] });
+  assert.ok(imageOutput.includes('multimodal'));
+  assert.ok(imageOutput.includes('image_generation'));
+  const audioInput = detectCapabilitiesFromModel({ id: 'unknown', input_modalities: ['audio'], output_modalities: ['text'] });
+  assert.ok(audioInput.includes('multimodal'));
+  assert.ok(audioInput.includes('text_generation'));
+  assert.ok(!audioInput.includes('audio_generation'));
+  // 元数据不可识别时仍回退到名称规则
+  assert.deepStrictEqual(detectCapabilitiesFromModel({ id: 'kling-v1', modalities: ['unknown'] }), ['video_generation']);
+});
+
+test('模型同步元数据保持完整并进入能力识别器', () => {
+  const { detectCapabilitiesFromModel, diagnoseCapabilitiesFromModel } = require('../../shared/capabilities');
+  const upstreamModel = {
+    id: 'vendor-model-001',
+    owned_by: 'vendor',
+    capabilities: ['video_generation'],
+    modalities: ['text'],
+    input_modalities: ['image'],
+    output_modalities: ['video'],
+    input_types: { image: true },
+    output_types: { video: true },
+    vendor_extension: { keep_me: true },
+  };
+  const transported = { ...upstreamModel, id: String(upstreamModel.id), owned_by: upstreamModel.owned_by || null };
+  assert.deepStrictEqual(transported.vendor_extension, { keep_me: true });
+  assert.deepStrictEqual(transported.input_modalities, ['image']);
+  assert.deepStrictEqual(transported.output_modalities, ['video']);
+  const caps = detectCapabilitiesFromModel(transported);
+  assert.ok(caps.includes('video_generation'));
+  assert.ok(caps.includes('multimodal'));
+  assert.ok(!caps.includes('image_generation'));
+  const diagnosis = diagnoseCapabilitiesFromModel(transported);
+  assert.strictEqual(diagnosis.source, 'capabilities');
+  assert.ok(diagnosis.presentFields.includes('input_modalities'));
+  assert.deepStrictEqual(diagnosis.capabilities, ['video_generation']);
+  const fallbackDiagnosis = diagnoseCapabilitiesFromModel({ id: 'kling-v1' });
+  assert.strictEqual(fallbackDiagnosis.source, 'name_fallback');
+  assert.deepStrictEqual(fallbackDiagnosis.capabilities, ['video_generation']);
 });
 
 test('未知命令被拒绝', () => {

@@ -7,7 +7,7 @@ import { Separator } from '@/components/ui/separator';
 import {
   LayoutDashboard, Lightbulb, FileText, Film, Image, Video, Archive,
   BookOpen, Settings, Menu, Cpu, ChevronLeft, ChevronRight, BookMarked, Music,
-  Scissors, HardDrive,
+  Scissors, HardDrive, ListChecks,
 } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 
@@ -20,9 +20,12 @@ const navItems = [
   { path: '/videos', label: '视频生成', icon: Video, group: 'create' },
   { path: '/audio', label: '音频制作', icon: Music, group: 'create' },
   { path: '/editor', label: '剪辑台', icon: Scissors, group: 'manage' },
+  { path: '/tasks', label: '任务中心', icon: ListChecks, group: 'manage' },
   { path: '/assets', label: '素材库', icon: Archive, group: 'manage' },
   { path: '/comic-editor', label: '条漫编辑器', icon: BookOpen, group: 'manage' },
-  { path: '/model-config', label: '模型配置', icon: Cpu, group: 'config' },
+  { path: '/model-config/image', label: '图片模型配置', icon: Image, group: 'config' },
+  { path: '/model-config/video', label: '视频模型配置', icon: Video, group: 'config' },
+  { path: '/model-config', label: '通用模型配置', icon: Cpu, group: 'config' },
   { path: '/templates', label: '提示词模板', icon: BookMarked, group: 'config' },
   { path: '/settings', label: '应用设置', icon: Settings, group: 'config' },
 ];

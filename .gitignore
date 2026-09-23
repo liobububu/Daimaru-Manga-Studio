@@ -61,3 +61,6 @@ history/*.json
 
 # OpenReel 剪辑台的构建产物（59MB，可从源码重建）
 editor-dist/
+
+# 本地 OpenReel schema / 调试检查产物
+.openreel-schema-check/

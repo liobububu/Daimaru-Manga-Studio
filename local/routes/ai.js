@@ -203,7 +203,7 @@ async function catalog() {
  */
 // 能力判断与前端共用一份规则（shared/capabilities.js），
 // 别在这里再写一遍 —— 两边规则不一致时，同一模型前端显示能用、服务端存的却是别的。
-const { detectCapabilities: guessCapabilities } = require('../../shared/capabilities');
+const { diagnoseCapabilitiesFromModel } = require('../../shared/capabilities');
 
 /** 从上游 /models 同步模型列表 */
 async function models(body) {
@@ -233,14 +233,17 @@ async function models(body) {
 
     if (apiConfigId) {
       for (const m of list) {
+        const diagnosis = diagnoseCapabilitiesFromModel(m);
+        const autoCaps = diagnosis.capabilities;
         await store.runQuery({
           table: CATALOG_TABLE, op: 'upsert',
           payload: {
             api_config_id: apiConfigId,
             model_id: m.id,
             display_name: m.id,
-            capabilities: guessCapabilities(m.id),
-            auto_detected_capabilities: guessCapabilities(m.id),
+            capabilities: autoCaps,
+            auto_detected_capabilities: autoCaps,
+            raw: m,
             source: 'synced',
             enabled: true,
           },
@@ -248,7 +251,12 @@ async function models(body) {
         });
       }
     }
-    return { ok: true, count: list.length, models: list };
+    return {
+      ok: true,
+      count: list.length,
+      models: list,
+      diagnostics: list.map(m => ({ id: m.id, ...diagnoseCapabilitiesFromModel(m) })),
+    };
   } catch (e) {
     // 上游问题不当成本服务错误，和 Edge Function 的做法一致
     return { ok: false, errorType: e.errorType || 'network', error: e.message, attempted: e.attempted };

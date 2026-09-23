@@ -25,6 +25,8 @@ interface AssetPickerDialogProps {
   title?: string;
   /** 按素材 metadata.category 筛选创作资产：character / scene / prop */
   category?: 'character' | 'scene' | 'prop';
+  /** 当前剧本/集数允许的分镜 ID；项目级公共资产（无 storyboard_id）始终保留 */
+  storyboardIds?: string[];
 }
 
 const ALL_PROJECTS = '__all__';
@@ -38,6 +40,7 @@ export default function AssetPickerDialog({
   projectId,
   title = '从素材库选择',
   category,
+  storyboardIds,
 }: AssetPickerDialogProps) {
   const [assets, setAssets] = useState<Asset[]>([]);
   const [loading, setLoading] = useState(false);
@@ -68,9 +71,11 @@ export default function AssetPickerDialog({
     if (open) load();
   }, [open, load]);
 
+  const storyboardIdSet = new Set(storyboardIds || []);
   const filtered = assets.filter(a =>
     a.name.toLowerCase().includes(search.toLowerCase()) &&
-    (!category || a.metadata?.category === category),
+    (!category || a.metadata?.category === category) &&
+    (!storyboardIds || !a.storyboard_id || storyboardIdSet.has(a.storyboard_id)),
   );
 
   function toggleSelect(id: string) {

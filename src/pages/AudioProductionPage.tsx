@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import MainLayout from '@/components/layouts/MainLayout';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -14,6 +14,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Slider } from '@/components/ui/slider';
 import { Switch } from '@/components/ui/switch';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Progress } from '@/components/ui/progress';
 import {
   Mic, Volume2, Play, Pause, Download, Trash2, Plus, Star, StarOff,
   Clock, CheckCircle, XCircle, Loader2, Music, User, RefreshCw, Wifi, WifiOff,
@@ -573,8 +574,10 @@ export default function AudioProductionPage() {
   const [netTesting, setNetTesting] = useState(false);
   const [netResult, setNetResult]   = useState<AudioProviderTestResult | null>(null);
 
-  // tab 控制（空状态跳转用）
-  const [activeTab, setActiveTab] = useState('tts');
+  // tab 控制；支持从分镜页直接进入指定分镜的配音流程
+  const location = useLocation();
+  const routeState = location.state as { tab?: string; storyboardId?: string; type?: 'voiceover' | 'dialogue' } | null;
+  const [activeTab, setActiveTab] = useState(routeState?.tab || 'tts');
 
   // ── 分镜配音状态 ──────────────────────────────────────────────────────────────
   const { selectedProjectId } = useProject();
@@ -585,18 +588,38 @@ export default function AudioProductionPage() {
   const [sbVoiceProfile, setSbVoiceProfile] = useState('');
   const [sbGenStates, setSbGenStates] = useState<Record<string, 'pending' | 'generating' | 'done' | 'error'>>({});
   const [sbBatchRunning, setSbBatchRunning] = useState(false);
+  const [sbBatchProgress, setSbBatchProgress] = useState({ done: 0, total: 0, success: 0, fail: 0 });
+  const sbBatchCancelRef = useRef(false);
   const [sbPlayingKey, setSbPlayingKey] = useState<string | null>(null);
   const sbAudioRefs = useRef<Record<string, HTMLAudioElement>>({});
+  const sbLoadKeyRef = useRef('');
+  const sbProjectRef = useRef(selectedProjectId || '');
+  sbProjectRef.current = selectedProjectId || '';
+  useEffect(() => () => { sbBatchCancelRef.current = true; }, []);
+  useEffect(() => { sbBatchCancelRef.current = true; setSbBatchRunning(false); }, [selectedProjectId]);
 
   async function loadSbStoryboards() {
     if (!selectedProjectId) return;
+    const projectId = selectedProjectId;
+    const targetId = routeState?.storyboardId;
+    const requestKey = `${projectId}::${targetId || 'all'}`;
+    sbLoadKeyRef.current = requestKey;
     setSbLoading(true);
     try {
-      const data = await getStoryboards(selectedProjectId);
-      setSbStoryboards(data);
-    } catch { toast.error('加载分镜失败'); }
-    finally { setSbLoading(false); }
+      const all = await getStoryboards(projectId);
+      const target = targetId ? all.find(item => item.id === targetId) : undefined;
+      const data = target?.script_id ? all.filter(item => item.script_id === target.script_id) : all;
+      if (sbLoadKeyRef.current === requestKey) setSbStoryboards(data);
+    } catch { if (sbLoadKeyRef.current === requestKey) toast.error('加载分镜失败'); }
+    finally { if (sbLoadKeyRef.current === requestKey) setSbLoading(false); }
   }
+
+  useEffect(() => {
+    if (routeState?.tab !== 'storyboard' || !selectedProjectId) return;
+    setActiveTab('storyboard');
+    if (routeState.type) setSbScope(routeState.type);
+    loadSbStoryboards();
+  }, [selectedProjectId, routeState?.tab, routeState?.storyboardId, routeState?.type]);
 
   // 计算配音范围内的行
   function getSbRows() {
@@ -616,27 +639,45 @@ export default function AudioProductionPage() {
     return rows;
   }
 
-  async function handleSbGenOne(storyboardId: string, type: 'voiceover' | 'dialogue', text: string) {
-    if (!sbApiConfigId) throw new Error('请先选择语音模型');
-    const modelEntry = ttsModels.find(m => m.api_config_id === sbApiConfigId);
-    if (!modelEntry) throw new Error('未找到对应语音模型配置');
+  async function handleSbGenOne(
+    storyboardId: string,
+    type: 'voiceover' | 'dialogue',
+    text: string,
+    context?: { projectId: string; modelCatalogId: string; voiceProfileId?: string },
+  ) {
+    const projectId = context?.projectId || selectedProjectId || '';
+    const modelEntry = context ? undefined : ttsModels.find(m => m.api_config_id === sbApiConfigId);
+    const modelCatalogId = context?.modelCatalogId || modelEntry?.id;
+    if (!modelCatalogId) throw new Error('未找到对应语音模型配置');
+    const voiceProfileId = context?.voiceProfileId ?? ((sbVoiceProfile && sbVoiceProfile !== 'default') ? sbVoiceProfile : undefined);
     const key = `${storyboardId}_${type}`;
-    setSbGenStates(prev => ({ ...prev, [key]: 'generating' }));
+    const workKey = `${projectId}::${storyboardId}::${type}`;
+    if (sbProjectRef.current === projectId) setSbGenStates(prev => ({ ...prev, [key]: 'generating' }));
     try {
       const result = await generateTts({
-        model_catalog_id: modelEntry.id,
+        model_catalog_id: modelCatalogId,
         text: text.trim(),
-        voice_profile_id: (sbVoiceProfile && sbVoiceProfile !== 'default') ? sbVoiceProfile : undefined,
-        project_id: selectedProjectId || undefined,
+        voice_profile_id: voiceProfileId,
+        project_id: projectId || undefined,
       });
       // 将生成的音频资产绑定到分镜
-      if (result?.asset?.id) {
-        await bindStoryboardAudio(storyboardId, result.asset.id, type);
+      const generatedAsset = result?.asset;
+      if (generatedAsset?.id) {
+        await bindStoryboardAudio(storyboardId, generatedAsset.id, type);
+        if (`${sbProjectRef.current}::${storyboardId}::${type}` !== workKey) return;
+        setSbStoryboards(prev => prev.map(storyboard => storyboard.id === storyboardId ? {
+          ...storyboard,
+          ...(type === 'voiceover'
+            ? { voiceover_asset_id: generatedAsset.id, voiceover_audio: generatedAsset }
+            : { dialogue_asset_id: generatedAsset.id, dialogue_audio: generatedAsset }),
+        } : storyboard));
       }
-      setSbGenStates(prev => ({ ...prev, [key]: 'done' }));
+      if (sbProjectRef.current === projectId) setSbGenStates(prev => ({ ...prev, [key]: 'done' }));
     } catch (e) {
-      setSbGenStates(prev => ({ ...prev, [key]: 'error' }));
-      toast.error(`生成失败：${e instanceof Error ? e.message : '未知错误'}`);
+      if (sbProjectRef.current === projectId) {
+        setSbGenStates(prev => ({ ...prev, [key]: 'error' }));
+        toast.error(`生成失败：${e instanceof Error ? e.message : '未知错误'}`);
+      }
       throw e;
     }
   }
@@ -646,18 +687,61 @@ export default function AudioProductionPage() {
     if (!sbApiConfigId) { toast.error('请先选择语音模型'); return; }
     const rows = getSbRows();
     if (rows.length === 0) { toast.error('没有符合范围的分镜文本'); return; }
+    const projectId = selectedProjectId;
+    const modelEntry = ttsModels.find(m => m.api_config_id === sbApiConfigId);
+    if (!modelEntry) { toast.error('未找到对应语音模型配置'); return; }
+    const context = {
+      projectId,
+      modelCatalogId: modelEntry.id,
+      voiceProfileId: (sbVoiceProfile && sbVoiceProfile !== 'default') ? sbVoiceProfile : undefined,
+    };
+    sbBatchCancelRef.current = false;
     setSbBatchRunning(true);
+    setSbBatchProgress({ done: 0, total: rows.length, success: 0, fail: 0 });
     let success = 0;
     let fail = 0;
+    let done = 0;
     for (const row of rows) {
+      if (sbBatchCancelRef.current || sbProjectRef.current !== projectId) break;
       try {
-        await handleSbGenOne(row.storyboard.id, row.type, row.text);
+        await handleSbGenOne(row.storyboard.id, row.type, row.text, context);
         success++;
       } catch { fail++; }
+      done++;
+      if (sbProjectRef.current === projectId) setSbBatchProgress({ done, total: rows.length, success, fail });
     }
-    await loadSbStoryboards();
-    setSbBatchRunning(false);
-    toast.success(`批量配音完成：成功 ${success} 条${fail > 0 ? `，失败 ${fail} 条` : ''}`);
+    if (sbProjectRef.current === projectId) {
+      await loadSbStoryboards();
+      setSbBatchRunning(false);
+      if (sbBatchCancelRef.current) toast.info(`已停止批量配音：完成 ${done}/${rows.length} 条；已完成结果已保留`);
+      else toast.success(`批量配音完成：成功 ${success} 条${fail > 0 ? `，失败 ${fail} 条` : ''}`);
+    }
+  }
+
+  function cancelSbBatch() {
+    sbBatchCancelRef.current = true;
+  }
+
+  async function retryFailedSbRows() {
+    const failedKeys = new Set(Object.entries(sbGenStates).filter(([, state]) => state === 'error').map(([key]) => key));
+    if (!failedKeys.size) { toast.info('当前没有失败的配音项'); return; }
+    const rows = getSbRows().filter(row => failedKeys.has(`${row.storyboard.id}_${row.type}`));
+    if (!rows.length) { toast.info('当前范围没有可重试的失败项'); return; }
+    const projectId = selectedProjectId;
+    const modelEntry = ttsModels.find(m => m.api_config_id === sbApiConfigId);
+    if (!projectId || !modelEntry) { toast.error('请先选择语音模型'); return; }
+    sbBatchCancelRef.current = false;
+    setSbBatchRunning(true);
+    setSbBatchProgress({ done: 0, total: rows.length, success: 0, fail: 0 });
+    let success = 0, fail = 0, done = 0;
+    const context = { projectId, modelCatalogId: modelEntry.id, voiceProfileId: (sbVoiceProfile && sbVoiceProfile !== 'default') ? sbVoiceProfile : undefined };
+    for (const row of rows) {
+      if (sbBatchCancelRef.current || sbProjectRef.current !== projectId) break;
+      try { await handleSbGenOne(row.storyboard.id, row.type, row.text, context); success++; } catch { fail++; }
+      done++;
+      if (sbProjectRef.current === projectId) setSbBatchProgress({ done, total: rows.length, success, fail });
+    }
+    if (sbProjectRef.current === projectId) { await loadSbStoryboards(); setSbBatchRunning(false); toast.info(`失败项重试完成：成功 ${success}，失败 ${fail}`); }
   }
 
   function handleSbPlay(key: string, url: string) {
@@ -1858,9 +1942,11 @@ export default function AudioProductionPage() {
                       </Button>
                       <Button size="sm" onClick={handleSbBatch} disabled={sbBatchRunning || sbLoading || !selectedProjectId}>
                         {sbBatchRunning
-                          ? <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />批量配音中…</>
+                          ? <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />批量配音 {sbBatchProgress.done}/{sbBatchProgress.total}</>
                           : <><Zap className="w-3.5 h-3.5 mr-1.5" />批量生成音频</>}
                       </Button>
+                      {sbBatchRunning && <Button size="sm" variant="outline" onClick={cancelSbBatch}>停止后续任务</Button>}
+                      {!sbBatchRunning && Object.values(sbGenStates).some(state => state === 'error') && <Button size="sm" variant="outline" onClick={retryFailedSbRows}><RefreshCw className="w-3.5 h-3.5 mr-1.5" />重试失败项</Button>}
                       {!selectedProjectId && (
                         <p className="text-xs text-muted-foreground">请先在顶部选择项目</p>
                       )}
@@ -1869,6 +1955,10 @@ export default function AudioProductionPage() {
                 </Card>
 
                 {/* 分镜列表 */}
+                {sbBatchRunning && sbBatchProgress.total > 0 && <div className="space-y-1.5">
+                  <div className="flex justify-between text-xs text-muted-foreground"><span>批量进度 · 成功 {sbBatchProgress.success} · 失败 {sbBatchProgress.fail}</span><span>{sbBatchProgress.done}/{sbBatchProgress.total}</span></div>
+                  <Progress value={Math.round(sbBatchProgress.done / sbBatchProgress.total * 100)} className="h-1.5" />
+                </div>}
                 {sbLoading ? (
                   <div className="space-y-2">{[1,2,3].map(i => <Skeleton key={i} className="h-16 w-full" />)}</div>
                 ) : getSbRows().length === 0 ? (
@@ -1894,7 +1984,7 @@ export default function AudioProductionPage() {
                       const isGenerating = genState === 'generating';
                       const isPlaying = sbPlayingKey === key;
                       return (
-                        <Card key={key} className="bg-card border-border">
+                        <Card key={key} className={`bg-card border-border ${routeState?.storyboardId === s.id && (!routeState.type || routeState.type === type) ? 'ring-1 ring-primary' : ''}`}>
                           <CardContent className="p-3">
                             <div className="flex items-start gap-3 min-w-0">
                               <div className="w-7 h-7 rounded bg-primary/20 flex items-center justify-center shrink-0 mt-0.5">

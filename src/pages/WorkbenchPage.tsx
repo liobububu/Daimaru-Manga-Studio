@@ -1,5 +1,5 @@
 import MainLayout from '@/components/layouts/MainLayout';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -18,10 +18,11 @@ import {
   LayoutDashboard, Layers, Image as ImageIcon,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { getProjectsWithStats, createProject, updateProject, deleteProject } from '@/services/api';
+import { getProjectsWithStats, createProject, updateProject, deleteProject, getScripts, getStoryboards, getAssets, checkLocalMediaFiles } from '@/services/api';
 import { useProject } from '@/contexts/ProjectContext';
 import type { Project } from '@/types/types';
 import { PROJECT_TYPE_OPTIONS, PLATFORM_OPTIONS, ASPECT_RATIO_OPTIONS } from '@/types/types';
+import { resolveProjectStage, sortEpisodes } from '../../shared/episode-flow.js';
 
 const quickActions = [
   { label: '爆款选题', icon: Lightbulb, path: '/topics', color: 'text-yellow-400' },
@@ -143,6 +144,7 @@ export default function WorkbenchPage() {
   const [formOpen, setFormOpen] = useState(false);
   const [editProject, setEditProject] = useState<Project | undefined>();
   const [deleteId, setDeleteId] = useState<string | null>(null);
+  const openProjectRef = useRef('');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -189,9 +191,56 @@ export default function WorkbenchPage() {
     }
   }
 
-  function handleOpen(p: Project) {
+  async function handleOpen(p: Project) {
+    openProjectRef.current = p.id;
     setSelectedProjectId(p.id);
-    navigate('/topics');
+    try {
+      const scripts = sortEpisodes(await getScripts(p.id));
+      if (openProjectRef.current !== p.id) return;
+      if (!scripts.length) { navigate('/scripts'); return; }
+      const assets = await getAssets(p.id);
+      if (openProjectRef.current !== p.id) return;
+      const assetsById = new Map(assets.map(asset => [asset.id, asset]));
+      const localUrls = assets.map(asset => asset.file_url || '').filter(url => url.startsWith('/api/files/'));
+      const checks: Record<string, { exists: boolean }> = await checkLocalMediaFiles(localUrls).catch(() => ({}));
+      if (openProjectRef.current !== p.id) return;
+      const usable = (id?: string) => {
+        if (!id) return false;
+        const url = assetsById.get(id)?.file_url;
+        if (!url) return false;
+        return !url.startsWith('/api/files/') || checks[url]?.exists === true;
+      };
+      const shotsByScript: Record<string, Awaited<ReturnType<typeof getStoryboards>>> = {};
+      for (const script of scripts) {
+        if (!script.content?.trim()) break;
+        shotsByScript[script.id] = await getStoryboards(p.id, script.id);
+        if (openProjectRef.current !== p.id) return;
+        const stage = resolveProjectStage(scripts, shotsByScript, usable);
+        if (stage.script?.id !== script.id || stage.stage !== 'complete') break;
+      }
+      const target = resolveProjectStage(scripts, shotsByScript, usable);
+      const script = target.script;
+      const shot = target.shot;
+      if (target.stage === 'script' && script) { navigate('/scripts', { state: { script } }); return; }
+      if (target.stage === 'storyboard' && script) { navigate('/storyboards', { state: { script, content: script.content || '' } }); return; }
+      if (target.stage === 'image' && shot) {
+        const queue = (shotsByScript[script?.id || ''] || []).filter(item => !usable(item.video_asset_id) && !usable(item.image_asset_id)).map(item => item.id);
+        navigate('/images', { state: { storyboard: shot, storyboardQueue: queue } }); return;
+      }
+      if (target.stage === 'video' && shot) {
+        const queue = (shotsByScript[script?.id || ''] || []).filter(item => !usable(item.video_asset_id) && usable(item.image_asset_id)).map(item => item.id);
+        navigate('/videos', { state: { storyboard: shot, storyboardQueue: queue } }); return;
+      }
+      if (target.stage === 'audio' && shot) {
+        navigate('/audio-production', { state: { tab: 'storyboard', storyboardId: shot.id, type: shot.voiceover?.trim() && !usable(shot.voiceover_asset_id) ? 'voiceover' : 'dialogue' } }); return;
+      }
+      const latest = target.script || scripts[scripts.length - 1];
+      navigate('/editor', { state: { projectId: p.id, scriptId: latest.id } });
+    } catch {
+      if (openProjectRef.current !== p.id) return;
+      toast.error('无法判断项目续作位置，已进入任务中心');
+      navigate('/tasks');
+    }
   }
 
   return (
@@ -322,7 +371,7 @@ export default function WorkbenchPage() {
                       <span>{new Date(p.updated_at).toLocaleDateString('zh-CN')}</span>
                     </div>
                     <Button size="sm" onClick={() => handleOpen(p)}>
-                      <FolderOpen className="w-3 h-3 mr-1" />打开
+                      <FolderOpen className="w-3 h-3 mr-1" />继续创作
                     </Button>
                   </div>
                 </CardContent>

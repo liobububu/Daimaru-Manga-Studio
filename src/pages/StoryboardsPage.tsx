@@ -1,7 +1,7 @@
 import MainLayout from '@/components/layouts/MainLayout';
 import ProjectSelector from '@/components/common/ProjectSelector';
 import ModelSelector from '@/components/common/ModelSelector';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -16,9 +16,10 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Film, Sparkles, Plus, Trash2, Edit, Copy, Download, Image, Video, ChevronRight, Mic, Play, Pause, Loader2, Unlink } from 'lucide-react';
 import { toast } from 'sonner';
 import { useProject } from '@/contexts/ProjectContext';
-import { getStoryboards, createStoryboards, createStoryboard, updateStoryboard, deleteStoryboard, callAiGenerate, buildPromptFromTemplate, parseJsonSafely, getPromptTemplates, getScripts, bindStoryboardAudio } from '@/services/api';
+import { checkLocalMediaFiles, getAssets, getStoryboards, createStoryboards, createStoryboard, updateStoryboard, deleteStoryboard, callAiGenerate, buildPromptFromTemplate, parseJsonSafely, getPromptTemplates, getScripts, bindStoryboardAudio } from '@/services/api';
 import type { Storyboard, Script, PromptTemplate } from '@/types/types';
 import { ASPECT_RATIO_OPTIONS } from '@/types/types';
+import { storyboardLoadKey, storyboardLoadIsCurrent } from '../../shared/episode-flow.js';
 
 const SHOT_TYPES = ['特写', '近景', '中景', '远景', '全景', '俯拍', '仰拍', '空镜'];
 const CAMERA_MOVEMENTS = ['固定', '推进', '拉远', '横移', '旋转', '手持', '跟随'];
@@ -53,6 +54,8 @@ export default function StoryboardsPage() {
   const [generating, setGenerating] = useState(false);
   const [scripts, setScripts] = useState<Script[]>([]);
   const [templates, setTemplates] = useState<PromptTemplate[]>([]);
+  const storyboardLoadKeyRef = useRef('');
+  const [assetUsableById, setAssetUsableById] = useState<Record<string, boolean>>({});
 
   // 参数
   const [scriptInput, setScriptInput] = useState('');
@@ -82,31 +85,67 @@ export default function StoryboardsPage() {
   const passedContent = (location.state as { content?: string })?.content;
 
   useEffect(() => {
-    if (passedContent) setScriptInput(passedContent);
-    if (passedScript) setSelectedScriptId(passedScript.id);
-  }, [passedContent, passedScript]);
+    if (!passedScript) return;
+    if (selectedProjectId && passedScript.project_id !== selectedProjectId) {
+      toast.error('传入剧本不属于当前项目，已阻止跨项目生成分镜');
+      return;
+    }
+    setSelectedScriptId(passedScript.id);
+    setScriptInput(passedContent ?? passedScript.content ?? '');
+  }, [passedContent, passedScript, selectedProjectId]);
 
   const loadStoryboards = useCallback(async () => {
-    if (!selectedProjectId) return;
+    if (!selectedProjectId || !selectedScriptId) {
+      storyboardLoadKeyRef.current = storyboardLoadKey(selectedProjectId || undefined, selectedScriptId || undefined);
+      setStoryboards([]);
+      setLoading(false);
+      return;
+    }
+    const requestKey = storyboardLoadKey(selectedProjectId, selectedScriptId);
+    storyboardLoadKeyRef.current = requestKey;
     setLoading(true);
     try {
-      const data = await getStoryboards(selectedProjectId, selectedScriptId || undefined);
-      setStoryboards(data);
-    } catch { toast.error('加载分镜失败'); }
-    finally { setLoading(false); }
+      const data = await getStoryboards(selectedProjectId, selectedScriptId);
+      if (storyboardLoadIsCurrent(requestKey, selectedProjectId, selectedScriptId) && storyboardLoadKeyRef.current === requestKey) setStoryboards(data);
+    } catch {
+      if (storyboardLoadKeyRef.current === requestKey) toast.error('加载分镜失败');
+    } finally {
+      if (storyboardLoadKeyRef.current === requestKey) setLoading(false);
+    }
   }, [selectedProjectId, selectedScriptId]);
 
   useEffect(() => { loadStoryboards(); }, [loadStoryboards]);
 
   useEffect(() => {
     if (selectedProjectId) {
-      getScripts(selectedProjectId).then(setScripts).catch(() => {});
+      getScripts(selectedProjectId).then(items => {
+        setScripts(items);
+        if (!passedScript && items.length > 0) {
+          setSelectedScriptId(current => current && items.some(item => item.id === current) ? current : items[0].id);
+        }
+      }).catch(() => {});
+    } else {
+      setScripts([]);
+      setSelectedScriptId('');
+      setSelectedShotIds(new Set());
     }
     getPromptTemplates('storyboard_generation').then(setTemplates).catch(() => {});
-  }, [selectedProjectId]);
+  }, [selectedProjectId, passedScript]);
+
+  useEffect(() => { setSelectedShotIds(new Set()); }, [selectedProjectId, selectedScriptId]);
+
+  useEffect(() => {
+    if (!selectedScriptId) return;
+    const selected = scripts.find(item => item.id === selectedScriptId);
+    if (selected) setScriptInput(selected.content || '');
+  }, [selectedScriptId, scripts]);
 
   async function handleGenerate() {
     if (!selectedProjectId) { toast.error('请先选择项目'); return; }
+    if (scripts.length > 0 && !selectedScriptId) { toast.error('请先选择当前剧本/集数，避免生成无归属分镜'); return; }
+    const selectedScript = scripts.find(item => item.id === selectedScriptId) || (passedScript?.id === selectedScriptId ? passedScript : undefined);
+    if (selectedScriptId && (!selectedScript || selectedScript.project_id !== selectedProjectId)) { toast.error('当前剧本与项目不一致，已阻止生成'); return; }
+    if (selectedScript && scriptInput !== (selectedScript.content || '')) { toast.error('当前文本与所选单集剧本不一致，请先保存到该剧本后再生成分镜'); return; }
     if (!modelId) { toast.error('请先选择模型'); return; }
     if (!scriptInput.trim()) { toast.error('请填写剧本内容'); return; }
 
@@ -185,6 +224,7 @@ ${scriptInput}
 
   async function handleAddShot() {
     if (!selectedProjectId) { toast.error('请先选择项目'); return; }
+    if (scripts.length > 0 && !selectedScriptId) { toast.error('请先选择当前剧本/集数'); return; }
     const maxIndex = storyboards.reduce((m, s) => Math.max(m, s.shot_index), 0);
     const newShot = await createStoryboard({
       project_id: selectedProjectId,
@@ -209,20 +249,60 @@ ${scriptInput}
 
   function selectedShots() { return storyboards.filter(s => selectedShotIds.has(s.id)); }
 
-  function batchGoToImages() {
-    const shots = selectedShots();
-    if (!shots.length) { toast.error('请先选择分镜'); return; }
-    const first = shots.find(s => !s.image_asset_id) || shots[0];
-    navigate('/images', { state: { storyboard: first, storyboardQueue: shots.map(s => s.id) } });
-    toast.info(`已带入 ${shots.length} 个分镜，先处理第 ${first.shot_index} 镜`);
+  useEffect(() => {
+    if (!selectedProjectId) { setAssetUsableById({}); return; }
+    const requestKey = storyboardLoadKey(selectedProjectId, selectedScriptId);
+    void (async () => {
+      const assets = await getAssets(selectedProjectId);
+      if (!storyboardLoadIsCurrent(requestKey, selectedProjectId, selectedScriptId)) return;
+      const localUrls = assets.map(asset => asset.file_url || '').filter(url => url.startsWith('/api/files/'));
+      const checks: Record<string, { exists: boolean }> = await checkLocalMediaFiles(localUrls).catch(() => ({}));
+      if (!storyboardLoadIsCurrent(requestKey, selectedProjectId, selectedScriptId)) return;
+      setAssetUsableById(Object.fromEntries(assets.map(asset => [asset.id, !!asset.file_url && (!asset.file_url.startsWith('/api/files/') || checks[asset.file_url]?.exists === true)])));
+    })();
+  }, [selectedProjectId, selectedScriptId, storyboards]);
+
+  const assetUsable = (id?: string) => !!id && assetUsableById[id] === true;
+
+  const episodeStats = storyboards.reduce((stats, shot) => {
+    if (assetUsable(shot.image_asset_id)) stats.images += 1;
+    if (assetUsable(shot.video_asset_id)) stats.videos += 1;
+    if (!shot.voiceover?.trim() || assetUsable(shot.voiceover_asset_id)) stats.voiceovers += 1;
+    if (!shot.dialogue?.trim() || assetUsable(shot.dialogue_asset_id)) stats.dialogues += 1;
+    return stats;
+  }, { images: 0, videos: 0, voiceovers: 0, dialogues: 0 });
+  const episodeComplete = storyboards.length > 0 && episodeStats.videos === storyboards.length && episodeStats.voiceovers === storyboards.length && episodeStats.dialogues === storyboards.length;
+
+  async function buildIncompleteQueue(shots: Storyboard[], field: 'image_asset_id' | 'video_asset_id') {
+    if (!selectedProjectId) return shots;
+    const assets = await getAssets(selectedProjectId);
+    const byId = new Map(assets.map(asset => [asset.id, asset]));
+    const referenced = shots.map(shot => byId.get(shot[field] || '')).filter(Boolean);
+    const localUrls = referenced.map(asset => asset?.file_url || '').filter(url => url.startsWith('/api/files/'));
+    const checks: Record<string, { exists: boolean }> = await checkLocalMediaFiles(localUrls).catch(() => ({}));
+    return shots.filter(shot => {
+      const asset = byId.get(shot[field] || '');
+      if (!asset?.file_url) return true;
+      return asset.file_url.startsWith('/api/files/') && checks[asset.file_url]?.exists !== true;
+    });
   }
 
-  function batchGoToVideos() {
+  async function batchGoToImages() {
     const shots = selectedShots();
     if (!shots.length) { toast.error('请先选择分镜'); return; }
-    const first = shots.find(s => !s.video_asset_id) || shots[0];
-    navigate('/videos', { state: { storyboard: first, storyboardQueue: shots.map(s => s.id) } });
-    toast.info(`已带入 ${shots.length} 个分镜，先处理第 ${first.shot_index} 镜`);
+    const pending = await buildIncompleteQueue(shots, 'image_asset_id');
+    if (!pending.length) { toast.success('所选分镜图片均已完成，无需重复生成'); return; }
+    navigate('/images', { state: { storyboard: pending[0], storyboardQueue: pending.map(s => s.id) } });
+    toast.info(`已跳过 ${shots.length - pending.length} 个已完成分镜，待生图 ${pending.length} 镜`);
+  }
+
+  async function batchGoToVideos() {
+    const shots = selectedShots();
+    if (!shots.length) { toast.error('请先选择分镜'); return; }
+    const pending = await buildIncompleteQueue(shots, 'video_asset_id');
+    if (!pending.length) { toast.success('所选分镜视频均已完成，无需重复生成'); return; }
+    navigate('/videos', { state: { storyboard: pending[0], storyboardQueue: pending.map(s => s.id) } });
+    toast.info(`已跳过 ${shots.length - pending.length} 个已完成分镜，待出片 ${pending.length} 镜`);
   }
 
   async function handleSaveEdit() {
@@ -325,11 +405,7 @@ ${scriptInput}
                 <ModelSelector functionKey="storyboard_generation" requiredCapability="text_generation" value={modelId} onChange={(mid, acid) => { setModelId(mid); setApiConfigId(acid); }} className="mt-1 w-full" />
               </div>
               <div><Label>从剧本库选择</Label>
-                <Select value={selectedScriptId} onValueChange={id => {
-                  setSelectedScriptId(id);
-                  const s = scripts.find(x => x.id === id);
-                  if (s?.content) setScriptInput(s.content);
-                }}>
+                <Select value={selectedScriptId} onValueChange={setSelectedScriptId}>
                   <SelectTrigger className="mt-1 w-full"><SelectValue placeholder="手动粘贴剧本" /></SelectTrigger>
                   <SelectContent>
                     {scripts.map(s => <SelectItem key={s.id} value={s.id}>{s.title}</SelectItem>)}
@@ -353,14 +429,32 @@ ${scriptInput}
                 </Select>
               </div>
             </div>
-            <div><Label>剧本内容（粘贴文本）</Label>
-              <Textarea className="mt-1" rows={4} value={scriptInput} onChange={e => setScriptInput(e.target.value)} placeholder="粘贴剧本内容..." />
+            <div><Label>当前单集剧本内容</Label>
+              <Textarea className="mt-1" rows={4} value={scriptInput} readOnly={!!selectedScriptId} onChange={e => setScriptInput(e.target.value)} placeholder="选择剧本后自动带入；无剧本项目可手动粘贴" />
+              {selectedScriptId && <p className="mt-1 text-xs text-muted-foreground">已锁定到当前剧本/集，避免修改文本后生成到错误集数。</p>}
             </div>
             <Button className="w-full md:w-auto" onClick={handleGenerate} disabled={generating}>
               <Sparkles className="w-4 h-4 mr-2" />{generating ? '生成中…' : '生成分镜'}
             </Button>
           </CardContent>
         </Card>
+
+        {storyboards.length > 0 && (
+          <Card className="bg-card border-border">
+            <CardContent className="p-3 flex items-center gap-3 flex-wrap">
+              <span className="text-sm font-medium">本集进度</span>
+              <Badge variant={episodeStats.images === storyboards.length ? 'default' : 'outline'}>图片 {episodeStats.images}/{storyboards.length}</Badge>
+              <Badge variant={episodeStats.videos === storyboards.length ? 'default' : 'outline'}>视频 {episodeStats.videos}/{storyboards.length}</Badge>
+              <Badge variant={episodeStats.voiceovers === storyboards.length ? 'default' : 'outline'}>旁白 {episodeStats.voiceovers}/{storyboards.length}</Badge>
+              <Badge variant={episodeStats.dialogues === storyboards.length ? 'default' : 'outline'}>对白 {episodeStats.dialogues}/{storyboards.length}</Badge>
+              {episodeComplete && (
+                <Button size="sm" className="ml-auto" onClick={() => navigate('/editor', { state: { projectId: selectedProjectId, scriptId: selectedScriptId } })}>
+                  本集素材已齐，进入剪辑台 <ChevronRight className="w-3 h-3 ml-1" />
+                </Button>
+              )}
+            </CardContent>
+          </Card>
+        )}
 
         {/* 分镜列表 */}
         <div>
@@ -502,7 +596,7 @@ ${scriptInput}
                               storyboard_id: s.id,
                               ...(s.video_prompt ? { prompt: encodeURIComponent(s.video_prompt) } : {}),
                             });
-                            navigate(`/videos?${params.toString()}`);
+                            navigate(`/videos?${params.toString()}`, { state: { storyboard: s } });
                           }}
                         >
                           用图生视频 <ChevronRight className="w-3 h-3 ml-0.5" />

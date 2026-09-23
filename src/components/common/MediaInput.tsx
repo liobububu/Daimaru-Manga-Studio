@@ -36,6 +36,7 @@ export interface MediaInputProps {
   items: MediaItem[];
   onChange: (items: MediaItem[]) => void;
   projectId?: string;
+  storyboardIds?: string[];
   /** 允许同时放置的最大数量（默认不限制） */
   maxCount?: number;
   /** 显示 role 选择器 */
@@ -142,7 +143,7 @@ async function uploadFile(file: File, kind: MediaKind): Promise<string> {
 
 // ── 主组件 ────────────────────────────────────────────────────────────────────
 export default function MediaInput({
-  kind, label, items, onChange, projectId,
+  kind, label, items, onChange, projectId, storyboardIds,
   maxCount, showRole = false, roleOptions,
   single = false, required = false, className,
 }: MediaInputProps) {
@@ -379,6 +380,7 @@ export default function MediaInput({
         multiple={!single}
         assetType={assetType}
         projectId={projectId}
+        storyboardIds={storyboardIds}
         title={`选择${kind === 'image' ? '图片' : kind === 'video' ? '视频' : '音频'}素材`}
       />
     </div>
