@@ -1,6 +1,6 @@
 {
   "name": "donghua-dawan-jia",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "动画大丸家 —— 面向短视频 / AI 漫剧 / 条漫创作者的 AI 辅助创作工作台。可接入任意 OpenAI 兼容协议的 API。",
   "type": "module",
   "license": "MIT",

@@ -7,7 +7,7 @@
 ## 下载
 
 不想自己构建的话，到 [Releases](https://github.com/liobububu/Daimaru-Manga-Studio/releases) 下载
-`DaimaruMangaStudio-vX.Y.Z-win-x64.zip`（当前代码版本 **v3.0.0**），解压后双击
+`DaimaruMangaStudio-vX.Y.Z-win-x64.zip`（当前代码版本 **v3.0.1**），解压后双击
 `DaimaruMangaStudio.exe` 即可 —— 不需要安装 Node 或其它运行时，FFmpeg 也已内置。
 
 > 压缩包内的文件名是 ASCII。中文文件名在 zip 里依赖系统编码，部分解压工具会解成乱码；
@@ -29,7 +29,7 @@
 
 ---
 
-## v3.0.0 本次更新重点
+## v3.0.1 本次更新重点
 
 这一轮更新重点不是增加孤立页面，而是把「剧本 → 分镜 → 图片 → 视频 → 音频 → 条漫 → 剪辑」的数据链真正连起来。
 
