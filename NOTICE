@@ -1,0 +1,23 @@
+动画大丸家 (Daimaru Manga Studio)
+Copyright 2026 动画大丸家 Contributors
+
+本产品包含第三方软件，按 Apache License 2.0 第 4 节要求在此声明：
+
+OpenReel Video
+  https://github.com/Augani/openreel-video
+  Licensed under the MIT License.
+  以独立构建的 Web 应用形式由本地服务托管在 /editor/，
+  经 iframe 隔离加载，不并入本项目的源码。
+
+FFmpeg
+  https://ffmpeg.org
+  作为独立进程调用（未链接），用于本地剪辑与渲染。
+  发行包内附的 FFmpeg 构建为 GPL 版本，
+  其许可条款以 FFmpeg 项目为准。
+
+Concat
+  https://github.com/jub0t/Concat
+  本项目不含其任何代码，也未发生源码合并。
+  仅借鉴剪辑层的设计理念（命令 + 文档、数值校验等），
+  接口与数据结构均为自行设计。Concat 采用 AGPL-3.0，
+  因未合并其代码，不影响本项目的许可选择。
